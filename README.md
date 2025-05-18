@@ -1,16 +1,12 @@
-# tts_reader
+TTS Reader
 
-A new Flutter project.
-
-## Getting Started
-
-This project is a starting point for a Flutter application.
-
-A few resources to get you started if this is your first Flutter project:
-
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
-
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+- [ ] 支持 GBK 格式文本
+- [ ] 底部朗读进度条长度对齐朗读文本
+- [ ] 支持 word/rtf、epub/mobi/azw3、pdf 格式（文本版及扫描版）
+- [ ] 优化 UI
+- [ ] 优化配置管理
+- [ ] 支持 iOS
+- [ ] 调整应用图标、名称
+- [ ] 支持系统默认的 TTS
+- [ ] 支持文件从云存储加载
+- [ ] 支持 web 端
