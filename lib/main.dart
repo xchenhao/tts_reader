@@ -4363,14 +4363,12 @@ class _MyHomePageState extends State<MyHomePage>
   }
 
   Widget _buildFloatingActionButtons(ThemeData theme) {
-    // Since animations are removed, we directly build the buttons.
     List<Widget> leftFabs = [];
     List<Widget> rightFabs = [];
 
     // Player Controls (Left)
     if (Platform.isWindows) {
-      final windowsPlayerState =
-          _windowsAudioPlayer.state; // Get current state directly
+      final windowsPlayerState = _windowsAudioPlayer.state;
       final isWindowsPlaying = windowsPlayerState == ap.PlayerState.playing;
 
       if (_isLoading &&
@@ -4552,7 +4550,7 @@ class _MyHomePageState extends State<MyHomePage>
         heroTag: 'volumeFabRight',
         mini: true,
         child: const Icon(Icons.volume_down_outlined),
-      ), // New Volume Button
+      ),
       const SizedBox(height: 10),
       FloatingActionButton(
         onPressed: _showSettingsDialog,
