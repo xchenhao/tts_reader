@@ -5,50 +5,62 @@ import 'dart:math'; // For min/max
 import 'dart:typed_data'; // 用于 Uint8List (音频字节)
 import 'dart:ui'; // For ImageFilter.blur
 
+import 'package:flutter/foundation.dart'; // For compute
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart'; // 文件选择器
 import 'package:http/http.dart' as http; // HTTP 客户端
 import 'package:http/io_client.dart'; // 用于带自定义 HttpClient 的 IOClient (代理)
 import 'package:just_audio/just_audio.dart' as ja; // just_audio 播放器, 使用别名 ja
+import 'package:audioplayers/audioplayers.dart'
+as ap; // audioplayers 播放器, 使用别名 ap
+import 'package:path_provider/path_provider.dart'; // For temporary file storage
+
 import 'package:flutter_secure_storage/flutter_secure_storage.dart'; // 安全存储
 import 'package:shared_preferences/shared_preferences.dart'; // 偏好设置存储
 import 'package:intl/intl.dart'; // For date formatting in logs
+import 'package:epub_parser/epub_parser.dart';
+// import 'package:gbk_codec/gbk_codec.dart'; // Only if GBK support for TXT is re-added
 
 // TTS Provider Enum
 enum TTSProvider { openai, microsoft }
 
+// Data class for Windows preloaded chunks
+class WindowsPreloadedChunk {
+  final int originalChunkIndex;
+  final String filePath;
+  final String text; // Keep the text for display purposes if needed
+
+  WindowsPreloadedChunk({
+    required this.originalChunkIndex,
+    required this.filePath,
+    required this.text,
+  });
+}
+
+
 // 辅助类：用于 just_audio 从内存字节流播放音频
-// This class allows just_audio to play audio from a byte stream in memory.
 class BytesAudioSource extends ja.StreamAudioSource {
-  final Uint8List _bytes; // 音频数据的字节数组 (Byte array of audio data)
-  final String _contentType; // 音频内容的 MIME 类型 (MIME type of the audio content)
+  final Uint8List _bytes;
+  final String _contentType;
 
   BytesAudioSource(this._bytes, {String contentType = 'audio/mpeg'})
-    : _contentType = contentType,
-      // OpenAI TTS 默认返回 mp3，其 MIME 类型为 'audio/mpeg' (OpenAI TTS defaults to mp3, MIME type 'audio/mpeg')
-      super(
+      : _contentType = contentType,
+        super(
         tag: 'BytesAudioSource',
-      ); // 为 AudioSource 添加标签是一个好习惯 (Adding a tag to AudioSource is good practice)
+      );
 
   @override
   Future<ja.StreamAudioResponse> request([int? start, int? end]) async {
-    // 处理请求的字节范围 (Handle the requested byte range)
     start ??= 0;
     end ??= _bytes.length;
-    // 截取请求范围内的字节 (Clip the bytes to the requested range)
     final clippedBytes = _bytes.sublist(start, end);
 
     return ja.StreamAudioResponse(
       sourceLength: _bytes.length,
-      // 原始音频总长度 (Total length of the original audio)
       contentLength: clippedBytes.length,
-      // 当前响应的字节长度 (Length of the current response bytes)
       offset: start,
-      // 当前响应字节在原始音频中的偏移量 (Offset of the current response bytes in the original audio)
       stream: Stream.value(clippedBytes),
-      // 将截取的字节作为流返回 (Return the clipped bytes as a stream)
-      contentType:
-          _contentType, // 音频内容的 MIME 类型 (MIME type of the audio content)
+      contentType: _contentType,
     );
   }
 }
@@ -67,12 +79,10 @@ class FetchAttemptResult {
 class ReadingTheme {
   final Color backgroundColor;
   final Color textColor;
-  final Color playingChunkTextColor; // For the whole chunk being played
-  final Color
-  karaokeFillColor; // Background for character-by-character highlight
-  final Color
-  karaokeTextColor; // Text color for character-by-character highlight
-  final bool applyBlur; // Flag to apply frosted glass effect
+  final Color playingChunkTextColor;
+  final Color karaokeFillColor;
+  final Color karaokeTextColor;
+  final bool applyBlur;
 
   ReadingTheme({
     required this.backgroundColor,
@@ -80,10 +90,9 @@ class ReadingTheme {
     required this.playingChunkTextColor,
     required this.karaokeFillColor,
     required this.karaokeTextColor,
-    this.applyBlur = false, // Default to no blur
+    this.applyBlur = false,
   });
 
-  // Method to serialize to JSON
   Map<String, String> toJson() => {
     'backgroundColor': backgroundColor.value.toRadixString(16),
     'textColor': textColor.value.toRadixString(16),
@@ -93,62 +102,28 @@ class ReadingTheme {
     'applyBlur': applyBlur.toString(),
   };
 
-  // Factory method to deserialize from JSON
   factory ReadingTheme.fromJson(Map<String, dynamic> json) {
     return ReadingTheme(
-      backgroundColor: Color(
-        int.parse(
-          json['backgroundColor'] ??
-              _defaultReadingTheme.backgroundColor.value.toRadixString(16),
-          radix: 16,
-        ),
-      ),
-      textColor: Color(
-        int.parse(
-          json['textColor'] ??
-              _defaultReadingTheme.textColor.value.toRadixString(16),
-          radix: 16,
-        ),
-      ),
-      playingChunkTextColor: Color(
-        int.parse(
-          json['playingChunkTextColor'] ??
-              _defaultReadingTheme.playingChunkTextColor.value.toRadixString(
-                16,
-              ),
-          radix: 16,
-        ),
-      ),
-      karaokeFillColor: Color(
-        int.parse(
-          json['karaokeFillColor'] ??
-              _defaultReadingTheme.karaokeFillColor.value.toRadixString(16),
-          radix: 16,
-        ),
-      ),
-      karaokeTextColor: Color(
-        int.parse(
-          json['karaokeTextColor'] ??
-              _defaultReadingTheme.karaokeTextColor.value.toRadixString(16),
-          radix: 16,
-        ),
-      ),
+      backgroundColor: Color(int.parse(json['backgroundColor'] ?? _defaultReadingTheme.backgroundColor.value.toRadixString(16), radix: 16)),
+      textColor: Color(int.parse(json['textColor'] ?? _defaultReadingTheme.textColor.value.toRadixString(16), radix: 16)),
+      playingChunkTextColor: Color(int.parse(json['playingChunkTextColor'] ?? _defaultReadingTheme.playingChunkTextColor.value.toRadixString(16), radix: 16)),
+      karaokeFillColor: Color(int.parse(json['karaokeFillColor'] ?? _defaultReadingTheme.karaokeFillColor.value.toRadixString(16), radix: 16)),
+      karaokeTextColor: Color(int.parse(json['karaokeTextColor'] ?? _defaultReadingTheme.karaokeTextColor.value.toRadixString(16), radix: 16)),
       applyBlur: (json['applyBlur'] ?? 'false') == 'true',
     );
   }
 }
 
-final ReadingTheme _defaultReadingTheme = ReadingTheme(
-  backgroundColor: const Color(0xFFF5F5DC),
-  // Beige
-  textColor: Colors.black87,
-  playingChunkTextColor: Colors.deepPurpleAccent,
-  karaokeFillColor: Colors.yellow.withOpacity(0.4),
-  karaokeTextColor: Colors.redAccent[700]!,
-);
+final ReadingTheme _defaultReadingTheme = _predefinedThemes['毛玻璃 (Frosted Glass)']!; // Default to Frosted Glass
 
 final Map<String, ReadingTheme> _predefinedThemes = {
-  '默认 (Default)': _defaultReadingTheme,
+  '默认 (Default)': ReadingTheme( // Original Default
+    backgroundColor: const Color(0xFFF5F5DC),
+    textColor: Colors.black87,
+    playingChunkTextColor: Colors.deepPurpleAccent,
+    karaokeFillColor: Colors.yellow.withOpacity(0.4),
+    karaokeTextColor: Colors.redAccent[700]!,
+  ),
   '米黄 (Beige)': ReadingTheme(
     backgroundColor: const Color(0xFFF5F5DC),
     textColor: Colors.black87,
@@ -179,14 +154,77 @@ final Map<String, ReadingTheme> _predefinedThemes = {
   ),
   '毛玻璃 (Frosted Glass)': ReadingTheme(
     backgroundColor: Colors.white.withOpacity(0.65),
-    // Semi-transparent white
     textColor: Colors.black87,
     playingChunkTextColor: Colors.blue[800]!,
     karaokeFillColor: Colors.lightBlueAccent.withOpacity(0.4),
     karaokeTextColor: Colors.blue[900]!,
-    applyBlur: true, // Enable blur for this theme
+    applyBlur: true,
   ),
 };
+
+
+// Top-level function for decoding file in an isolate
+Future<String> _readFileContentInBackground(Map<String, dynamic> params) async {
+  final String filePath = params['filePath'];
+  final File file = File(filePath);
+  final String lowerCaseFilePath = filePath.toLowerCase();
+
+  if (lowerCaseFilePath.endsWith('.epub')) {
+    try {
+      EpubBook epubBook = await EpubReader.readBook(file.readAsBytesSync());
+      StringBuffer sb = StringBuffer();
+
+      if (epubBook.Content?.Html != null && epubBook.Content!.Html!.isNotEmpty) {
+        for (var htmlFile in epubBook.Content!.Html!.values) {
+          if (htmlFile.Content != null) {
+            String plainText = htmlFile.Content!
+                .replaceAll(RegExp(r'<[^>]*>'), ' ')
+                .replaceAll(RegExp(r'\s+'), ' ')
+                .trim();
+            sb.writeln(plainText);
+            sb.writeln();
+          }
+        }
+      }
+      else if (epubBook.Chapters != null && epubBook.Chapters!.isNotEmpty) {
+        for (var chapter in epubBook.Chapters!) {
+          if (chapter.HtmlContent != null) {
+            String plainText = chapter.HtmlContent!
+                .replaceAll(RegExp(r'<[^>]*>'), ' ')
+                .replaceAll(RegExp(r'\s+'), ' ')
+                .trim();
+            sb.writeln(plainText);
+            sb.writeln();
+          }
+        }
+      }
+
+      if (sb.isEmpty) {
+        return "未能从 EPUB 文件中提取文本内容。(Could not extract text content from EPUB file.)";
+      }
+      return sb.toString();
+    } catch (e) {
+      debugPrint("EPUB parsing failed for $filePath. Error: $e");
+      return "EPUB 文件解析失败: $e (EPUB file parsing failed: $e)";
+    }
+  } else if (lowerCaseFilePath.endsWith('.mobi') || lowerCaseFilePath.endsWith('.azw3')) {
+    return "不支持直接读取 MOBI/AZW3 文件内容。\n请先将文件转换为 EPUB 或 TXT 格式。\n(Direct reading of MOBI/AZW3 content is not supported. Please convert to EPUB or TXT first.)";
+  }else { // For TXT files, assume UTF-8
+    final bytes = await file.readAsBytes();
+    try {
+      return utf8.decode(bytes, allowMalformed: false); // Strict UTF-8 decoding
+    } catch (e) {
+      debugPrint("UTF-8 decoding failed for $filePath (strict), trying with allowMalformed. Error: $e");
+      try {
+        return utf8.decode(bytes, allowMalformed: true);
+      } catch (e2) {
+        debugPrint("UTF-8 decoding with allowMalformed also failed for $filePath. Error: $e2");
+        return "无法以UTF-8解码文件: $e2 (Failed to decode file as UTF-8)";
+      }
+    }
+  }
+}
+
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -227,31 +265,26 @@ class MyHomePage extends StatefulWidget {
   State<MyHomePage> createState() => _MyHomePageState();
 }
 
-class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
+class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver, TickerProviderStateMixin {
   final _mainTextHolderController = TextEditingController();
   final _displayAreaScrollController = ScrollController();
 
   final _secureStorage = const FlutterSecureStorage();
   late SharedPreferences _prefs;
 
-  // --- TTS Provider Settings ---
-  TTSProvider _selectedTTSProvider = TTSProvider.openai; // Default to OpenAI
+  TTSProvider _selectedTTSProvider = TTSProvider.openai;
 
-  // --- OpenAI Settings ---
-  String _apiKey = ''; // For OpenAI
+  String _apiKey = '';
   String _selectedModel = _MyHomePageState._defaultOpenAIModelSettings;
   String _selectedVoice = _MyHomePageState._defaultOpenAIVoiceSettings;
 
-  // --- Microsoft Azure TTS Settings ---
   String _msSubscriptionKey = '';
   String _msRegion = _MyHomePageState._defaultMsRegionSettings;
   String _msSelectedLanguage = _MyHomePageState._defaultMsLanguage;
   String _msSelectedVoiceName = '';
-  Map<String, List<String>> _dynamicMsVoicesByLanguage =
-      {}; // For dynamically fetched MS voices
+  Map<String, List<String>> _dynamicMsVoicesByLanguage = {};
   bool _isFetchingMsVoices = false;
 
-  // --- Common Settings ---
   bool _isLoading = false;
   String? _currentlyFetchingChunkText;
   bool _isBufferingInBackground = false;
@@ -261,12 +294,27 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
   String _proxyPort = _MyHomePageState._defaultProxyPortSettings;
   double _playbackSpeed = _MyHomePageState._defaultPlaybackSpeedSettings;
   ReadingTheme _currentReadingTheme = _defaultReadingTheme;
+  Locale _selectedLocale = const Locale('zh');
+  double _volume = _MyHomePageState._defaultVolumeSettings;
 
-  // double _brightnessOverlayOpacity = 0.0; // Removed
 
-  final ja.AudioPlayer _audioPlayer = ja.AudioPlayer();
+  final ja.AudioPlayer _justAudioPlayer = ja.AudioPlayer();
+  final ap.AudioPlayer _windowsAudioPlayer = ap.AudioPlayer();
+  StreamSubscription? _windowsPlayerCompleteSubscription;
+  StreamSubscription? _windowsPlayerStateSubscription;
+  StreamSubscription? _windowsPlayerPositionSubscription;
+  final List<WindowsPreloadedChunk> _windowsPreloadedChunks = [];
 
-  // --- Default Settings Constants ---
+  // AnimationController? _leftFabAnimationController; // Removed
+  // Animation<double>? _leftFabOpacityAnimation; // Removed
+  // Animation<Offset>? _leftFabSlideAnimation; // Removed
+
+  // AnimationController? _rightFabAnimationController; // Removed
+  // Animation<double>? _rightFabOpacityAnimation; // Removed
+  // Animation<Offset>? _rightFabSlideAnimation; // Removed
+  // Timer? _fabHideTimer; // Removed
+
+
   static const String _defaultOpenAIModelSettings = 'tts-1';
   static const String _defaultOpenAIVoiceSettings = 'nova';
   static const String _defaultMsRegionSettings = 'westus';
@@ -275,12 +323,12 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
   static const String _defaultProxyHostSettings = '127.0.0.1';
   static const String _defaultProxyPortSettings = '7897';
   static const double _defaultPlaybackSpeedSettings = 1.0;
+  static const double _defaultVolumeSettings = 1.0; // Default volume
   static const double _minPlaybackSpeed = 0.25;
   static const double _maxPlaybackSpeed = 5.0;
   static const int _defaultMaxCharsPerRequestSettings = 300;
   static const int _defaultPrefetchChunkCountSettings = 2;
 
-  // static const double _defaultBrightnessOverlayOpacity = 0.0; // Removed
 
   final List<String> _openAIModels = ['tts-1', 'tts-1-hd'];
   final List<String> _openAIVoices = [
@@ -291,8 +339,6 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
     'nova',
     'shimmer',
   ];
-
-  // Hardcoded MS voices as a fallback
   final Map<String, List<String>> _msHardcodedVoicesByLanguage = {
     'zh-CN': [
       'zh-CN-XiaoxiaoNeural',
@@ -313,8 +359,10 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
     'ko-KR': ['ko-KR-SunHiNeural', 'ko-KR-InJoonNeural'],
   };
 
+
   int _maxCharsPerRequest = _MyHomePageState._defaultMaxCharsPerRequestSettings;
   int _prefetchChunkCount = _MyHomePageState._defaultPrefetchChunkCountSettings;
+
 
   String _currentTextForDisplay = "";
   List<Map<String, dynamic>> _processedTextChunks = [];
@@ -343,17 +391,223 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
   int? _lastPlayedPositionMillis;
   bool _resumePromptShownThisSession = false;
 
+  final Map<String, Map<String, String>> _localizedStrings = {
+    'zh': {
+      'settingsTitle': '设置',
+      'readAloudButton': '朗读文本',
+      'cancelLoadingButton': '取消加载',
+      'pauseButton': '暂停',
+      'stopButton': '停止',
+      'resumeButton': '继续',
+      'inputTextButton': '输入或加载文本',
+      'bookmarksButton': '书签',
+      'playbackSpeedButton': '播放倍速',
+      'volumeButton': '音量', // New
+      'settingsButton': '设置',
+      'inputDialogTitle': '输入或加载文本',
+      'inputDialogLabel': '在此输入文本',
+      'inputDialogHint': '输入或粘贴文本内容...',
+      'loadFromFileButton': '从文件加载',
+      'applyTextButton': '应用文本',
+      'cancelButton': '取消',
+      'noBookmarks': '暂无书签。',
+      'bookmarksDialogTitle': '书签',
+      'deleteBookmarkTooltip': '删除书签',
+      'noBookmarksForText': '没有找到对应文本的书签。',
+      'closeButton': '关闭',
+      'playbackSpeedDialogTitle': '设置播放倍速',
+      'volumeDialogTitle': '设置音量', // New
+      'currentSpeedLabel': '当前倍速',
+      'currentVolumeLabel': '当前音量', // New
+      'applyButton': '应用',
+      'ttsProviderLabel': 'TTS 服务提供商',
+      'openAIApiKeyLabel': 'OpenAI API Key',
+      'openAIApiKeyHint': 'sk-xxxxxxxxxx',
+      'openAIModelLabel': 'OpenAI TTS 模型',
+      'openAIVoiceLabel': 'OpenAI TTS 语音',
+      'testOpenAIConfigButton': '检测 OpenAI 配置',
+      'msSubKeyLabel': 'Microsoft 订阅密钥',
+      'msRegionLabel': 'Microsoft 服务区域',
+      'msRegionHint': '例如: eastus, westus2',
+      'msLanguageLabel': 'Microsoft TTS 语言',
+      'refreshVoiceListTooltip': '刷新语音列表',
+      'msVoiceNameLabel': 'Microsoft TTS 语音名称',
+      'msVoiceNotAvailable': '请先选择语言并刷新语音列表。',
+      'testMSConfigButton': '检测 Microsoft 配置',
+      'maxCharsLabel': '最大请求字符数',
+      'maxCharsHint': '例如: 4000',
+      'prefetchChunksLabel': '预加载片段数',
+      'prefetchChunksHint': '例如: 2',
+      'useProxyLabel': '使用 HTTP 代理',
+      'proxyHostLabel': '代理服务器地址',
+      'proxyPortLabel': '代理服务器端口',
+      'readingThemeLabel': '阅读主题',
+      'selectPresetThemeLabel': '选择预设主题',
+      'saveCurrentConfigButton': '保存当前配置',
+      'loadManageConfigButton': '加载/管理配置',
+      'viewClearLogsButton': '查看/清除日志',
+      'resetActiveSettingsButton': '重置活动设置',
+      'interfaceLanguageLabel': '界面语言',
+      'errorLogsTitle': '错误日志',
+      'noLogs': '暂无日志。',
+      'clearLogsButton': '清除日志',
+      'saveProfileTitle': '保存配置',
+      'profileNameHint': '输入配置文件名称',
+      'saveButton': '保存',
+      'loadProfileTitle': '加载/管理配置',
+      'noSavedProfiles': '没有已保存的配置。',
+      'exportProfileTooltip': '导出配置',
+      'loadProfileTooltip': '加载',
+      'deleteProfileTooltip': '删除',
+      'importProfileButton': '导入配置文件',
+      'nameThisProfileLabel': '为此配置命名',
+      'importButton': '导入',
+      'confirmOverwriteTitle': '确认覆盖',
+      'confirmOverwriteMessage': '配置文件 "{profileName}" 已存在。要覆盖它吗？',
+      'yesButton': '是',
+      'noButton': '否',
+      'confirmDeleteTitle': '确认删除',
+      'confirmDeleteMessage': '确定要删除配置 "{profileName}" 吗？此操作无法撤销。',
+      'deleteButton': '删除',
+      'chunkLabel': '片段',
+      'speedLabel': '倍速',
+      'bufferingLabel': '缓冲',
+      'loadingLabel': '正在加载',
+      'resumePromptMessage': '是否从上次的进度继续朗读？',
+    },
+    'en': {
+      'settingsTitle': 'Settings',
+      'readAloudButton': 'Read Aloud',
+      'cancelLoadingButton': 'Cancel Loading',
+      'pauseButton': 'Pause',
+      'stopButton': 'Stop',
+      'resumeButton': 'Resume',
+      'inputTextButton': 'Input or Load Text',
+      'bookmarksButton': 'Bookmarks',
+      'playbackSpeedButton': 'Playback Speed',
+      'volumeButton': 'Volume', // New
+      'settingsButton': 'Settings',
+      'inputDialogTitle': 'Input or Load Text',
+      'inputDialogLabel': 'Enter text here',
+      'inputDialogHint': 'Type or paste text content...',
+      'loadFromFileButton': 'Load from File',
+      'applyTextButton': 'Apply Text',
+      'cancelButton': 'Cancel',
+      'noBookmarks': 'No bookmarks yet.',
+      'bookmarksDialogTitle': 'Bookmarks',
+      'deleteBookmarkTooltip': 'Delete Bookmark',
+      'noBookmarksForText': 'No bookmarks found for current text.',
+      'closeButton': 'Close',
+      'playbackSpeedDialogTitle': 'Set Playback Speed',
+      'volumeDialogTitle': 'Set Volume', // New
+      'currentSpeedLabel': 'Current Speed',
+      'currentVolumeLabel': 'Current Volume', // New
+      'applyButton': 'Apply',
+      'ttsProviderLabel': 'TTS Provider',
+      'openAIApiKeyLabel': 'OpenAI API Key',
+      'openAIApiKeyHint': 'sk-xxxxxxxxxx',
+      'openAIModelLabel': 'OpenAI TTS Model',
+      'openAIVoiceLabel': 'OpenAI TTS Voice',
+      'testOpenAIConfigButton': 'Test OpenAI Config',
+      'msSubKeyLabel': 'Microsoft Subscription Key',
+      'msRegionLabel': 'Microsoft Service Region',
+      'msRegionHint': 'e.g.: eastus, westus2',
+      'msLanguageLabel': 'Microsoft TTS Language',
+      'refreshVoiceListTooltip': 'Refresh Voice List',
+      'msVoiceNameLabel': 'Microsoft TTS Voice Name',
+      'msVoiceNotAvailable': 'Please select language and refresh voice list.',
+      'testMSConfigButton': 'Test Microsoft Config',
+      'maxCharsLabel': 'Max Chars/Request',
+      'maxCharsHint': 'e.g.: 4000',
+      'prefetchChunksLabel': 'Prefetch Chunks',
+      'prefetchChunksHint': 'e.g.: 2',
+      'useProxyLabel': 'Use HTTP Proxy',
+      'proxyHostLabel': 'Proxy Host',
+      'proxyPortLabel': 'Proxy Port',
+      'readingThemeLabel': 'Reading Theme',
+      'selectPresetThemeLabel': 'Select Preset Theme',
+      'saveCurrentConfigButton': 'Save Current Configuration',
+      'loadManageConfigButton': 'Load/Manage Configurations',
+      'viewClearLogsButton': 'View/Clear Logs',
+      'resetActiveSettingsButton': 'Reset Active Settings',
+      'interfaceLanguageLabel': 'Interface Language',
+      'errorLogsTitle': 'Error Logs',
+      'noLogs': 'No logs yet.',
+      'clearLogsButton': 'Clear Logs',
+      'saveProfileTitle': 'Save Configuration',
+      'profileNameHint': 'Enter profile name',
+      'saveButton': 'Save',
+      'loadProfileTitle': 'Load/Manage Configurations',
+      'noSavedProfiles': 'No saved profiles.',
+      'exportProfileTooltip': 'Export Profile',
+      'loadProfileTooltip': 'Load',
+      'deleteProfileTooltip': 'Delete',
+      'importProfileButton': 'Import Profile',
+      'nameThisProfileLabel': 'Name this profile',
+      'importButton': 'Import',
+      'confirmOverwriteTitle': 'Confirm Overwrite',
+      'confirmOverwriteMessage': 'Profile "{profileName}" already exists. Overwrite it?',
+      'yesButton': 'Yes',
+      'noButton': 'No',
+      'confirmDeleteTitle': 'Confirm Delete',
+      'confirmDeleteMessage': 'Are you sure you want to delete profile "{profileName}"? This action cannot be undone.',
+      'deleteButton': 'Delete',
+      'chunkLabel': 'Chunk',
+      'speedLabel': 'Speed',
+      'bufferingLabel': 'Buffering',
+      'loadingLabel': 'Loading',
+      'resumePromptMessage': 'Resume from last position?',
+    }
+  };
+
+  String _tr(String key, {Map<String, String>? params}) {
+    String? translated = _localizedStrings[_selectedLocale.languageCode]?[key] ?? _localizedStrings['zh']?[key];
+    if (translated == null) return key; // Fallback to key if no translation
+    if (params != null) {
+      params.forEach((paramKey, value) {
+        translated = translated!.replaceAll('{$paramKey}', value);
+      });
+    }
+    return translated!;
+  }
+
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _loadSettingsAndProfiles();
 
-    _audioPlayer.playerStateStream.listen((playerState) {
+    // FAB animations are removed
+    // _leftFabAnimationController = AnimationController(
+    //   vsync: this,
+    //   duration: const Duration(milliseconds: 300),
+    // );
+    // _leftFabOpacityAnimation = Tween<double>(begin: 1.0, end: 0.0).animate(
+    //   CurvedAnimation(parent: _leftFabAnimationController!, curve: Curves.easeOut),
+    // );
+    // _leftFabSlideAnimation = Tween<Offset>(begin: Offset.zero, end: const Offset(-1.5, 0.0))
+    //     .animate(CurvedAnimation(parent: _leftFabAnimationController!, curve: Curves.easeOut));
+
+    // _rightFabAnimationController = AnimationController(
+    //   vsync: this,
+    //   duration: const Duration(milliseconds: 300),
+    // );
+    // _rightFabOpacityAnimation = Tween<double>(begin: 1.0, end: 0.0).animate(
+    //   CurvedAnimation(parent: _rightFabAnimationController!, curve: Curves.easeOut),
+    // );
+    // _rightFabSlideAnimation = Tween<Offset>(begin: Offset.zero, end: const Offset(1.5, 0.0))
+    //     .animate(CurvedAnimation(parent: _rightFabAnimationController!, curve: Curves.easeOut));
+
+
+    // Listener for just_audio (non-Windows)
+    _justAudioPlayer.playerStateStream.listen((playerState) {
+      if (Platform.isWindows) return;
+      // _updateFabVisibilityBasedOnPlayback(); // Removed
       if (mounted) {
         final processingState = playerState.processingState;
         if ((processingState == ja.ProcessingState.idle &&
-                !playerState.playing) ||
+            !playerState.playing) ||
             processingState == ja.ProcessingState.completed) {
           if (_isLoading) {
             setState(() {
@@ -366,13 +620,13 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
               _currentlyPlayingChunkIndex < _processedTextChunks.length) {
             _saveCurrentPlaybackProgress(
               _currentlyPlayingChunkIndex,
-              _audioPlayer.duration ?? Duration.zero,
+              _justAudioPlayer.duration ?? Duration.zero,
             );
-            _toggleBookmark(
-              _processedTextChunks[_currentlyPlayingChunkIndex]['startIndex']
-                  as int,
-              autoAddOnly: true,
-            );
+            // _toggleBookmark( // Removed auto-bookmarking
+            //   _processedTextChunks[_currentlyPlayingChunkIndex]['startIndex']
+            //       as int,
+            //   autoAddOnly: true,
+            // );
             setState(() {
               _currentlyPlayingChunkIndex = -1;
               _highlightedCharacterInChunkIndex = -1;
@@ -385,7 +639,7 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
               _currentlyPlayingChunkIndex < _processedTextChunks.length) {
             _saveCurrentPlaybackProgress(
               _currentlyPlayingChunkIndex,
-              _audioPlayer.position,
+              _justAudioPlayer.position,
             );
           }
         }
@@ -395,15 +649,15 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
       }
     });
 
-    _positionSubscription = _audioPlayer.positionStream.listen((position) {
+    _positionSubscription = _justAudioPlayer.positionStream.listen((position) {
+      if (Platform.isWindows) return;
       if (!mounted ||
           _currentlyPlayingChunkIndex < 0 ||
           _currentlyPlayingChunkIndex >= _processedTextChunks.length) {
         return;
       }
-
       final currentChunkData =
-          _processedTextChunks[_currentlyPlayingChunkIndex];
+      _processedTextChunks[_currentlyPlayingChunkIndex];
       final chunkText = currentChunkData['text'] as String?;
       final chunkDurationMillis = currentChunkData['durationMillis'] as int?;
 
@@ -413,16 +667,94 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
           chunkDurationMillis > 0) {
         double progressRatio = position.inMilliseconds / chunkDurationMillis;
         progressRatio = progressRatio.clamp(0.0, 1.0);
-
         int newCharIndex = (progressRatio * chunkText.length).floor();
         newCharIndex = newCharIndex.clamp(0, chunkText.length - 1);
-
         if (newCharIndex != _highlightedCharacterInChunkIndex) {
-          setState(() {
-            _highlightedCharacterInChunkIndex = newCharIndex;
-          });
+          setState(() => _highlightedCharacterInChunkIndex = newCharIndex);
         }
       }
+    });
+
+    // Listeners for audioplayers (Windows)
+    _windowsPlayerStateSubscription = _windowsAudioPlayer.onPlayerStateChanged
+        .listen((ap.PlayerState s) {
+      if (!Platform.isWindows || !mounted) return;
+      // _updateFabVisibilityBasedOnPlayback(); // Removed
+      setState(() {
+        // Potentially update UI based on _windowsAudioPlayer.state
+      });
+    });
+    _windowsPlayerCompleteSubscription = _windowsAudioPlayer.onPlayerComplete
+        .listen((event) async {
+      if (!Platform.isWindows || !mounted) return;
+
+      WindowsPreloadedChunk? playedChunkData;
+      if (_windowsPreloadedChunks.isNotEmpty && _currentlyPlayingChunkIndex == _windowsPreloadedChunks.first.originalChunkIndex) {
+        playedChunkData = _windowsPreloadedChunks.removeAt(0);
+        try {
+          final file = File(playedChunkData.filePath);
+          if (await file.exists()) {
+            await file.delete();
+          }
+        } catch (e) {
+          _addErrorLog("Error deleting temp file ${playedChunkData.filePath}: $e");
+        }
+      }
+
+
+      if (_currentlyPlayingChunkIndex != -1 && _processedTextChunks.isNotEmpty && _currentlyPlayingChunkIndex < _processedTextChunks.length) {
+        _saveCurrentPlaybackProgress(
+          _currentlyPlayingChunkIndex,
+          Duration.zero,
+        );
+      }
+
+      int nextChunkToPlayInProcessedList = _currentlyPlayingChunkIndex + 1;
+
+      if (_windowsPreloadedChunks.isNotEmpty && _windowsPreloadedChunks.first.originalChunkIndex == nextChunkToPlayInProcessedList) {
+        await _startWindowsPlaybackFromQueue();
+      } else if (nextChunkToPlayInProcessedList < _processedTextChunks.length) {
+        await _initiatePlaybackFromIndex(nextChunkToPlayInProcessedList);
+      }
+      else {
+        setState(() {
+          _currentlyPlayingChunkIndex = -1;
+          _highlightedCharacterInChunkIndex = -1;
+          _isLoading = false;
+        });
+        // _showFabs(); // Removed
+      }
+      if (_windowsPreloadedChunks.length < _prefetchChunkCount && _currentChunkIndexToFetch < _processedTextChunks.length) {
+        _preloadNextWindowsChunk();
+      }
+    });
+    _windowsPlayerPositionSubscription = _windowsAudioPlayer.onPositionChanged
+        .listen((Duration p) {
+      if (!Platform.isWindows ||
+          !mounted ||
+          _currentlyPlayingChunkIndex < 0 ||
+          _currentlyPlayingChunkIndex >= _processedTextChunks.length)
+        return;
+
+      final currentChunkData =
+      _processedTextChunks[_currentlyPlayingChunkIndex];
+      final chunkText = currentChunkData['text'] as String?;
+      _windowsAudioPlayer.getDuration().then((d) {
+        if (d != null &&
+            chunkText != null &&
+            chunkText.isNotEmpty &&
+            d.inMilliseconds > 0) {
+          double progressRatio = p.inMilliseconds / d.inMilliseconds;
+          progressRatio = progressRatio.clamp(0.0, 1.0);
+          int newCharIndex = (progressRatio * chunkText.length).floor();
+          newCharIndex = newCharIndex.clamp(0, chunkText.length - 1);
+          if (newCharIndex != _highlightedCharacterInChunkIndex) {
+            setState(
+                  () => _highlightedCharacterInChunkIndex = newCharIndex,
+            );
+          }
+        }
+      });
     });
   }
 
@@ -433,7 +765,14 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
     _displayAreaScrollController.dispose();
     _currentIndexSubscription?.cancel();
     _positionSubscription?.cancel();
-    _audioPlayer.dispose();
+    _justAudioPlayer.dispose();
+    _windowsAudioPlayer.dispose();
+    _windowsPlayerCompleteSubscription?.cancel();
+    _windowsPlayerStateSubscription?.cancel();
+    _windowsPlayerPositionSubscription?.cancel();
+    // _leftFabAnimationController?.dispose(); // Removed
+    // _rightFabAnimationController?.dispose(); // Removed
+    // _fabHideTimer?.cancel(); // Removed
     super.dispose();
   }
 
@@ -442,23 +781,65 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
     super.didChangeAppLifecycleState(state);
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.detached) {
-      if (_audioPlayer.playing ||
-          (_audioPlayer.audioSource != null &&
-              _currentlyPlayingChunkIndex != -1 &&
-              _processedTextChunks.isNotEmpty &&
-              _currentlyPlayingChunkIndex < _processedTextChunks.length)) {
+      if (_currentlyPlayingChunkIndex != -1 &&
+          _processedTextChunks.isNotEmpty &&
+          _currentlyPlayingChunkIndex < _processedTextChunks.length) {
+        Duration currentPosition = Duration.zero;
+        if (Platform.isWindows) {
+          // Handled by onPlayerComplete or stop for Windows
+        } else {
+          currentPosition = _justAudioPlayer.position;
+        }
         _saveCurrentPlaybackProgress(
           _currentlyPlayingChunkIndex,
-          _audioPlayer.position,
+          currentPosition,
         );
-        _toggleBookmark(
-          _processedTextChunks[_currentlyPlayingChunkIndex]['startIndex']
-              as int,
-          autoAddOnly: true,
-        );
+        // _toggleBookmark( // Removed auto-bookmarking
+        //   _processedTextChunks[_currentlyPlayingChunkIndex]['startIndex']
+        //       as int,
+        //   autoAddOnly: true,
+        // );
       }
     }
   }
+
+  bool _isCurrentlyPlaying() {
+    if (Platform.isWindows) {
+      return _windowsAudioPlayer.state == ap.PlayerState.playing;
+    } else {
+      return _justAudioPlayer.playing;
+    }
+  }
+
+  // void _updateFabVisibilityBasedOnPlayback() { // Removed
+  //   if (_isCurrentlyPlaying()) {
+  //     _hideFabsWithDelay();
+  //   } else {
+  //     _showFabs();
+  //   }
+  // }
+
+  // void _showFabs() { // Removed
+  //   _fabHideTimer?.cancel();
+  //   _leftFabAnimationController?.reverse();
+  //   _rightFabAnimationController?.reverse();
+  // }
+
+  // void _hideFabs() { // Removed
+  //   _fabHideTimer?.cancel();
+  //   _leftFabAnimationController?.forward();
+  //   _rightFabAnimationController?.forward();
+  // }
+
+  // void _hideFabsWithDelay() { // Removed
+  //   _fabHideTimer?.cancel();
+  //   _fabHideTimer = Timer(const Duration(seconds: 2), () {
+  //     if (_isCurrentlyPlaying() && mounted) {
+  //         _hideFabs();
+  //     }
+  //   });
+  // }
+
 
   Future<void> _loadSettingsAndProfiles() async {
     _prefs = await SharedPreferences.getInstance();
@@ -481,7 +862,7 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
       try {
         Map<String, dynamic> decodedProfiles = jsonDecode(profilesJson);
         _savedProfiles = decodedProfiles.map(
-          (key, value) => MapEntry(key, value as String),
+              (key, value) => MapEntry(key, value as String),
         );
       } catch (e) {
         _savedProfiles = {};
@@ -500,55 +881,65 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
     } else {
       _currentReadingTheme = _defaultReadingTheme;
     }
-    // _brightnessOverlayOpacity = _prefs.getDouble('brightness_overlay_opacity') ?? _defaultBrightnessOverlayOpacity; // Removed
+    String? savedLocale = _prefs.getString('app_locale');
+    if (savedLocale != null) {
+      _selectedLocale = Locale(savedLocale);
+    }
+    _volume = _prefs.getDouble('volume_level') ?? _MyHomePageState._defaultVolumeSettings;
+
 
     setState(() {
-      _selectedTTSProvider =
-          TTSProvider.values[_prefs.getInt('tts_provider') ??
-              TTSProvider.openai.index];
-      _selectedModel =
-          _prefs.getString('tts_model') ??
+      _selectedTTSProvider = TTSProvider
+          .values[_prefs.getInt('tts_provider') ?? TTSProvider.openai.index];
+      _selectedModel = _prefs.getString('tts_model') ??
           _MyHomePageState._defaultOpenAIModelSettings;
-      _selectedVoice =
-          _prefs.getString('tts_voice') ??
+      _selectedVoice = _prefs.getString('tts_voice') ??
           _MyHomePageState._defaultOpenAIVoiceSettings;
-      _msRegion =
-          _prefs.getString('ms_region') ??
+      _msRegion = _prefs.getString('ms_region') ??
           _MyHomePageState._defaultMsRegionSettings;
-      _msSelectedLanguage =
-          _prefs.getString('ms_language') ??
+      _msSelectedLanguage = _prefs.getString('ms_language') ??
           _MyHomePageState._defaultMsLanguage;
-      _msSelectedVoiceName =
-          _prefs.getString('ms_voice_name') ??
+      _msSelectedVoiceName = _prefs.getString('ms_voice_name') ??
           (_msHardcodedVoicesByLanguage[_msSelectedLanguage]?.first ?? '');
 
-      _useProxy =
-          _prefs.getBool('use_proxy') ??
+      _useProxy = _prefs.getBool('use_proxy') ??
           _MyHomePageState._defaultUseProxySettings;
-      _proxyHost =
-          _prefs.getString('proxy_host') ??
+      _proxyHost = _prefs.getString('proxy_host') ??
           _MyHomePageState._defaultProxyHostSettings;
-      _proxyPort =
-          _prefs.getString('proxy_port') ??
+      _proxyPort = _prefs.getString('proxy_port') ??
           _MyHomePageState._defaultProxyPortSettings;
-      _playbackSpeed =
-          _prefs.getDouble('playback_speed') ??
+      _playbackSpeed = _prefs.getDouble('playback_speed') ??
           _MyHomePageState._defaultPlaybackSpeedSettings;
-      _maxCharsPerRequest =
-          _prefs.getInt('max_chars_per_request') ??
+      _maxCharsPerRequest = _prefs.getInt('max_chars_per_request') ??
           _MyHomePageState._defaultMaxCharsPerRequestSettings;
-      _prefetchChunkCount =
-          _prefs.getInt('prefetch_chunk_count') ??
+      _prefetchChunkCount = _prefs.getInt('prefetch_chunk_count') ??
           _MyHomePageState._defaultPrefetchChunkCountSettings;
-      _audioPlayer.setSpeed(_playbackSpeed);
+      if (Platform.isWindows) {
+        _windowsAudioPlayer.setPlaybackRate(_playbackSpeed);
+        _windowsAudioPlayer.setVolume(_volume);
+      } else {
+        _justAudioPlayer.setSpeed(_playbackSpeed);
+        _justAudioPlayer.setVolume(_volume);
+      }
     });
+
+    if (_selectedTTSProvider == TTSProvider.microsoft &&
+        _msSubscriptionKey.isNotEmpty &&
+        _msRegion.isNotEmpty) {
+      await _fetchMicrosoftVoices(
+        _msRegion,
+        _msSubscriptionKey,
+        initialLoad: true,
+      );
+    }
 
     _loadAndPromptForResume();
   }
 
   Future<void> _loadAndPromptForResume() async {
     _lastPlayedTextContentHash = _prefs.getInt('last_played_text_content_hash');
-    _lastPlayedChunkStartIndex = _prefs.getInt('last_played_chunk_start_index');
+    _lastPlayedChunkStartIndex =
+        _prefs.getInt('last_played_chunk_start_index');
     _lastPlayedPositionMillis = _prefs.getInt('last_played_position_millis');
 
     if (!_resumePromptShownThisSession &&
@@ -563,10 +954,10 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: const Text('是否从上次的进度继续朗读？(Resume from last position?)'),
+              content: Text(_tr('resumePromptMessage')),
               duration: const Duration(seconds: 10),
               action: SnackBarAction(
-                label: '是 (Yes)',
+                label: _tr('yesButton'),
                 onPressed: () {
                   _resumePlayback();
                 },
@@ -579,13 +970,12 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
   }
 
   Future<void> _saveCurrentPlaybackProgress(
-    int currentChunkListIndex,
-    Duration position,
-  ) async {
+      int currentChunkListIndex,
+      Duration position,
+      ) async {
     if (!mounted ||
         currentChunkListIndex < 0 ||
-        currentChunkListIndex >= _processedTextChunks.length)
-      return;
+        currentChunkListIndex >= _processedTextChunks.length) return;
 
     final chunkData = _processedTextChunks[currentChunkListIndex];
     final int chunkStartIndex = chunkData['startIndex'] as int;
@@ -596,7 +986,7 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
     );
     await _prefs.setInt('last_played_chunk_start_index', chunkStartIndex);
     await _prefs.setInt('last_played_position_millis', position.inMilliseconds);
-    _toggleBookmark(chunkStartIndex, autoAddOnly: true); // Auto-bookmark
+    // _toggleBookmark(chunkStartIndex, autoAddOnly: true); // Removed auto-bookmarking
   }
 
   Future<void> _clearLastPlayedProgress() async {
@@ -626,7 +1016,7 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
         );
         _chunkKeys = List.generate(
           _processedTextChunks.length,
-          (_) => GlobalKey(),
+              (_) => GlobalKey(),
         );
       });
     }
@@ -717,11 +1107,12 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
     await _prefs.setInt('max_chars_per_request', _maxCharsPerRequest);
     await _prefs.setInt('prefetch_chunk_count', _prefetchChunkCount);
     await _prefs.setDouble('playback_speed', _playbackSpeed);
+    await _prefs.setDouble('volume_level', _volume); // Save volume
     await _prefs.setString(
       'reading_theme',
       jsonEncode(_currentReadingTheme.toJson()),
     );
-    // await _prefs.setDouble('brightness_overlay_opacity', _brightnessOverlayOpacity); // Removed
+    await _prefs.setString('app_locale', _selectedLocale.languageCode);
     await _saveBookmarks();
   }
 
@@ -740,7 +1131,7 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
     required int maxChars,
     required int prefetchCount,
     required ReadingTheme readingTheme,
-    // required double brightnessOverlayOpacity, // Removed
+    Locale? appLocale,
   }) async {
     _selectedTTSProvider = ttsProvider;
     _apiKey = openAIApiKey;
@@ -756,7 +1147,10 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
     _maxCharsPerRequest = maxChars;
     _prefetchChunkCount = prefetchCount;
     _currentReadingTheme = readingTheme;
-    // _brightnessOverlayOpacity = brightnessOverlayOpacity; // Removed
+    if (appLocale != null) {
+      _selectedLocale = appLocale;
+    }
+
 
     await _persistCurrentActiveSettings();
 
@@ -783,7 +1177,7 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
     _msSelectedVoiceName =
         _msHardcodedVoicesByLanguage[_MyHomePageState._defaultMsLanguage]
             ?.first ??
-        '';
+            '';
 
     _useProxy = _MyHomePageState._defaultUseProxySettings;
     _proxyHost = _MyHomePageState._defaultProxyHostSettings;
@@ -791,12 +1185,15 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
     _maxCharsPerRequest = _MyHomePageState._defaultMaxCharsPerRequestSettings;
     _prefetchChunkCount = _MyHomePageState._defaultPrefetchChunkCountSettings;
     _currentReadingTheme = _defaultReadingTheme;
-    // _brightnessOverlayOpacity = _defaultBrightnessOverlayOpacity; // Removed
+    _selectedLocale = const Locale('zh'); // Reset locale to Chinese
+
 
     await _setPlaybackSpeed(
       _MyHomePageState._defaultPlaybackSpeedSettings,
       save: true,
     );
+    await _setVolume(_MyHomePageState._defaultVolumeSettings, save: true);
+
 
     // Persist all defaults as active settings
     await _persistCurrentActiveSettings();
@@ -824,11 +1221,33 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
         _playbackSpeed = clampedSpeed;
       });
     }
-    await _audioPlayer.setSpeed(clampedSpeed);
+    if (Platform.isWindows) {
+      await _windowsAudioPlayer.setPlaybackRate(clampedSpeed);
+    } else {
+      await _justAudioPlayer.setSpeed(clampedSpeed);
+    }
     if (save) {
       await _prefs.setDouble('playback_speed', clampedSpeed);
     }
   }
+
+  Future<void> _setVolume(double newVolume, {bool save = true}) async {
+    final clampedVolume = newVolume.clamp(0.0, 1.0);
+    if (mounted) {
+      setState(() {
+        _volume = clampedVolume;
+      });
+    }
+    if (Platform.isWindows) {
+      await _windowsAudioPlayer.setVolume(clampedVolume);
+    } else {
+      await _justAudioPlayer.setVolume(clampedVolume);
+    }
+    if (save) {
+      await _prefs.setDouble('volume_level', clampedVolume);
+    }
+  }
+
 
   http.Client _getHttpClient({
     bool? useDialogProxy,
@@ -865,9 +1284,9 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
   }
 
   List<Map<String, dynamic>> _splitTextIntoDetailedChunks(
-    String text,
-    int chunkSize,
-  ) {
+      String text,
+      int chunkSize,
+      ) {
     List<Map<String, dynamic>> chunks = [];
     if (text.isEmpty || chunkSize <= 0) {
       return chunks;
@@ -885,18 +1304,24 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
   }
 
   Future<void> _resetTTSState() async {
-    await _audioPlayer.stop();
-    try {
-      await _audioPlayer.setAudioSource(
-        ja.ConcatenatingAudioSource(children: []),
-      );
-    } catch (e) {
-      // print("Debug: Error resetting audio source in _resetTTSState: $e");
+    if (Platform.isWindows) {
+      await _windowsAudioPlayer.stop();
+      await _clearWindowsPreloadedChunks(); // Clear any temp files
+    } else {
+      await _justAudioPlayer.stop();
+      try {
+        await _justAudioPlayer.setAudioSource(
+          ja.ConcatenatingAudioSource(children: []),
+        );
+      } catch (e) {
+        // ignore
+      }
+      _playlist?.clear().catchError((_) {
+        /* ignore */
+      });
+      _playlist = null;
     }
-    _playlist?.clear().catchError((_) {
-      /* ignore */
-    });
-    _playlist = null;
+
     _processedTextChunks = [];
     _chunkKeys = [];
     _currentlyPlayingChunkIndex = -1;
@@ -917,9 +1342,9 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
   }
 
   Future<void> _initiatePlaybackFromIndex(
-    int startChunkIndex, {
-    Duration? resumePosition,
-  }) async {
+      int startChunkIndex, {
+        Duration? resumePosition,
+      }) async {
     if (!mounted) return;
 
     final textToSpeak = _mainTextHolderController.text;
@@ -940,7 +1365,7 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
         );
         _chunkKeys = List.generate(
           _processedTextChunks.length,
-          (_) => GlobalKey(),
+              (_) => GlobalKey(),
         );
         _highlightedCharacterInChunkIndex = -1;
       });
@@ -957,11 +1382,17 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
       return;
     }
 
-    await _audioPlayer.stop();
-    _playlist?.clear().catchError((_) {});
-    _playlist = ja.ConcatenatingAudioSource(children: []);
+    if (Platform.isWindows) {
+      await _windowsAudioPlayer.stop();
+      await _clearWindowsPreloadedChunks();
+      _currentChunkIndexToFetch = startChunkIndex;
+    } else {
+      await _justAudioPlayer.stop();
+      _playlist?.clear().catchError((_) {});
+      _playlist = ja.ConcatenatingAudioSource(children: []);
+      _currentChunkIndexToFetch = startChunkIndex;
+    }
 
-    _currentChunkIndexToFetch = startChunkIndex;
     _currentlyPlayingChunkIndex = -1;
     _highlightedCharacterInChunkIndex = -1;
     _isFetchingMore = false;
@@ -972,108 +1403,326 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
       _isLoading = true;
       _currentlyFetchingChunkText = null;
     });
+    // _updateFabVisibilityBasedOnPlayback(); // Removed
 
-    final int playbackSessionStartChunkIndex = _currentChunkIndexToFetch;
-    bool fetchSuccess = await _fetchAndAddChunksToPlaylist(
-      count: _prefetchChunkCount,
-    );
-
-    if (fetchSuccess && _playlist != null && _playlist!.length > 0 && mounted) {
-      try {
-        await _audioPlayer.setSpeed(_playbackSpeed);
-        await _audioPlayer.setAudioSource(
-          _playlist!,
-          initialIndex: 0,
-          preload: true,
-        );
-
-        if (resumePosition != null && resumePosition.inMilliseconds > 0) {
-          await _audioPlayer.seek(resumePosition, index: 0);
-        }
-        _audioPlayer.play();
-        if (mounted)
-          setState(() {
-            _isLoading = false;
-            _currentlyFetchingChunkText = null;
-          });
-
-        _currentIndexSubscription = _audioPlayer.currentIndexStream.listen((
-          playlistIdx,
-        ) {
-          if (playlistIdx != null && _playlist != null && mounted) {
-            final int actualChunkIndexInProcessedList =
-                playbackSessionStartChunkIndex + playlistIdx;
-            if (actualChunkIndexInProcessedList < _processedTextChunks.length) {
-              setState(() {
-                _currentlyPlayingChunkIndex = actualChunkIndexInProcessedList;
-                _highlightedCharacterInChunkIndex = -1;
-              });
-              _saveCurrentPlaybackProgress(
-                actualChunkIndexInProcessedList,
-                Duration.zero,
-              ); // Save at start of new chunk
-
-              WidgetsBinding.instance.addPostFrameCallback((_) {
-                if (mounted &&
-                    actualChunkIndexInProcessedList < _chunkKeys.length &&
-                    _chunkKeys[actualChunkIndexInProcessedList]
-                            .currentContext !=
-                        null) {
-                  Scrollable.ensureVisible(
-                    _chunkKeys[actualChunkIndexInProcessedList].currentContext!,
-                    duration: const Duration(milliseconds: 350),
-                    alignment: 0.3,
-                    curve: Curves.easeInOut,
-                  );
-                }
-              });
-              final int remainingInPlaylist =
-                  _playlist!.length - 1 - playlistIdx;
-              if (remainingInPlaylist < _refetchThreshold &&
-                  !_isFetchingMore &&
-                  _currentChunkIndexToFetch < _processedTextChunks.length) {
-                _fetchMoreChunksInBackground();
-              }
-            }
-          }
-        });
-      } catch (e) {
+    if (Platform.isWindows) {
+      // Initial preloading for Windows
+      for (int i = 0; i < _prefetchChunkCount && _currentChunkIndexToFetch < _processedTextChunks.length; i++) {
+        await _preloadNextWindowsChunk(); // Await initial preloads
+      }
+      if (_windowsPreloadedChunks.isNotEmpty) {
+        await _startWindowsPlaybackFromQueue(resumePosition: resumePosition);
+      } else if (_processedTextChunks.isNotEmpty) { // If no preloaded but chunks exist (e.g. prefetch = 0 or failed)
+        await _fetchAndPlaySingleChunkWindows(startChunkIndex, resumePosition: resumePosition);
+      }
+      else {
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(
-                '设置音频源或播放失败 (Error setting audio source or playing): $e',
-              ),
-            ),
-          );
-          setState(() {
-            _isLoading = false;
-            _currentlyFetchingChunkText = null;
-          });
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('未能预加载音频片段。(Failed to preload audio segments.)')));
+          setState(() { _isLoading = false; });
+          // _showFabs(); // Removed
         }
       }
-    } else {
-      if (mounted) {
-        if (!fetchSuccess && _processedTextChunks.isNotEmpty) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('未能获取音频片段。(Failed to fetch audio segments.)'),
-            ),
+    } else { // Non-Windows
+      final int playbackSessionStartChunkIndex = _currentChunkIndexToFetch;
+      bool fetchSuccess = await _fetchAndAddChunksToPlaylist(
+        count: _prefetchChunkCount,
+      );
+
+      if (fetchSuccess &&
+          _playlist != null &&
+          _playlist!.length > 0 &&
+          mounted) {
+        try {
+          await _justAudioPlayer.setSpeed(_playbackSpeed);
+          await _justAudioPlayer.setAudioSource(
+            _playlist!,
+            initialIndex: 0,
+            preload: true,
           );
+
+          if (resumePosition != null && resumePosition.inMilliseconds > 0) {
+            await _justAudioPlayer.seek(resumePosition, index: 0);
+          }
+          _justAudioPlayer.play();
+          if (mounted)
+            setState(() {
+              _isLoading = false;
+              _currentlyFetchingChunkText = null;
+            });
+
+          _currentIndexSubscription =
+              _justAudioPlayer.currentIndexStream.listen((playlistIdx) {
+                if (playlistIdx != null && _playlist != null && mounted) {
+                  final int actualChunkIndexInProcessedList =
+                      playbackSessionStartChunkIndex + playlistIdx;
+                  if (actualChunkIndexInProcessedList <
+                      _processedTextChunks.length) {
+                    setState(() {
+                      _currentlyPlayingChunkIndex = actualChunkIndexInProcessedList;
+                      _highlightedCharacterInChunkIndex = -1;
+                    });
+                    _saveCurrentPlaybackProgress(
+                      actualChunkIndexInProcessedList,
+                      Duration.zero,
+                    );
+
+                    WidgetsBinding.instance.addPostFrameCallback((_) {
+                      if (mounted &&
+                          actualChunkIndexInProcessedList < _chunkKeys.length &&
+                          _chunkKeys[actualChunkIndexInProcessedList]
+                              .currentContext !=
+                              null) {
+                        Scrollable.ensureVisible(
+                          _chunkKeys[actualChunkIndexInProcessedList]
+                              .currentContext!,
+                          duration: const Duration(milliseconds: 350),
+                          alignment: 0.3,
+                          curve: Curves.easeInOut,
+                        );
+                      }
+                    });
+                    final int remainingInPlaylist =
+                        _playlist!.length - 1 - playlistIdx;
+                    if (remainingInPlaylist < _refetchThreshold &&
+                        !_isFetchingMore &&
+                        _currentChunkIndexToFetch < _processedTextChunks.length) {
+                      _fetchMoreChunksInBackground();
+                    }
+                  }
+                }
+              });
+        } catch (e) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  '设置音频源或播放失败 (Error setting audio source or playing): $e',
+                ),
+              ),
+            );
+            setState(() {
+              _isLoading = false;
+              _currentlyFetchingChunkText = null;
+            });
+            // _showFabs(); // Removed
+          }
         }
+      } else {
+        if (mounted) {
+          if (!fetchSuccess && _processedTextChunks.isNotEmpty) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content:
+                Text('未能获取音频片段。(Failed to fetch audio segments.)'),
+              ),
+            );
+          }
+          setState(() {
+            _isLoading = false;
+            _currentlyFetchingChunkText = null;
+          });
+          // _showFabs(); // Removed
+        }
+      }
+    }
+  }
+
+  Future<String> _getTempFilePath(int chunkIndex) async {
+    final directory = await getTemporaryDirectory();
+    return '${directory.path}/tts_chunk_$chunkIndex.mp3';
+  }
+
+  Future<void> _clearWindowsPreloadedChunks() async {
+    for (var preloadedChunk in _windowsPreloadedChunks) {
+      try {
+        final file = File(preloadedChunk.filePath);
+        if (await file.exists()) {
+          await file.delete();
+        }
+      } catch (e) {
+        _addErrorLog("Error deleting temp file ${preloadedChunk.filePath}: $e");
+      }
+    }
+    _windowsPreloadedChunks.clear();
+  }
+
+  Future<void> _preloadNextWindowsChunk() async {
+    if (!Platform.isWindows || _currentChunkIndexToFetch >= _processedTextChunks.length || _windowsPreloadedChunks.length >= _prefetchChunkCount) {
+      if (mounted && _windowsPreloadedChunks.length >= _prefetchChunkCount) { // If buffer is full, stop showing buffering
         setState(() {
-          _isLoading = false;
-          _currentlyFetchingChunkText = null;
+          _isBufferingInBackground = false;
+          _backgroundBufferingPreviewText = null;
+        });
+      }
+      return;
+    }
+
+    final chunkData = _processedTextChunks[_currentChunkIndexToFetch];
+    final String chunkText = chunkData['text'] as String;
+    final int originalIndex = _currentChunkIndexToFetch;
+
+    if (mounted) {
+      setState(() {
+        _isBufferingInBackground = true;
+        _backgroundBufferingPreviewText = chunkText;
+      });
+    }
+
+    final client = _getHttpClient();
+    FetchAttemptResult fetchResult = await _attemptFetchChunkWithRetries(
+      chunkText,
+      originalIndex + 1,
+      client,
+    );
+
+    if (mounted) {
+      if (fetchResult.status == RetryStatus.success && fetchResult.audioBytes != null) {
+        try {
+          final filePath = await _getTempFilePath(originalIndex);
+          final file = File(filePath);
+          await file.writeAsBytes(fetchResult.audioBytes!);
+          _windowsPreloadedChunks.add(WindowsPreloadedChunk(originalChunkIndex: originalIndex, filePath: filePath, text: chunkText));
+          _currentChunkIndexToFetch++; // Move to next chunk for further preloading
+        } catch (e) {
+          _addErrorLog("Error saving preloaded chunk $originalIndex: $e");
+        }
+      } else {
+        _addErrorLog("Failed to fetch chunk $originalIndex for preloading.");
+      }
+      if (client is IOClient) client.close(); else if (client is http.Client && client != http.Client()) client.close();
+
+      // Check if this was the last chunk to be preloaded in the current batch or if all chunks are fetched
+      bool stillNeedToPreloadMoreForThisBatch = _windowsPreloadedChunks.length < _prefetchChunkCount && _currentChunkIndexToFetch < _processedTextChunks.length;
+      if (!stillNeedToPreloadMoreForThisBatch || _currentChunkIndexToFetch >= _processedTextChunks.length) {
+        setState(() {
+          _isBufferingInBackground = false;
+          _backgroundBufferingPreviewText = null;
         });
       }
     }
   }
 
+  Future<void> _startWindowsPlaybackFromQueue({Duration? resumePosition}) async {
+    if (!Platform.isWindows || !mounted || _windowsPreloadedChunks.isEmpty) {
+      if(mounted) {
+        setState(() => _isLoading = false);
+        // _showFabs(); // Removed
+      }
+      return;
+    }
+
+    final chunkToPlay = _windowsPreloadedChunks.first; // Get the next chunk from the queue
+
+    setState(() {
+      _isLoading = true; // Still true as we are about to play
+      _currentlyPlayingChunkIndex = chunkToPlay.originalChunkIndex;
+      _currentlyFetchingChunkText = chunkToPlay.text;
+    });
+
+    try {
+      await _windowsAudioPlayer.setSource(ap.DeviceFileSource(chunkToPlay.filePath));
+      await _windowsAudioPlayer.setPlaybackRate(_playbackSpeed);
+      if (resumePosition != null && resumePosition.inMilliseconds > 0) {
+        await _windowsAudioPlayer.seek(resumePosition);
+      }
+      await _windowsAudioPlayer.resume();
+      if (mounted) setState(() { _isLoading = false; _currentlyFetchingChunkText = null;});
+      _saveCurrentPlaybackProgress(chunkToPlay.originalChunkIndex, Duration.zero);
+    } catch (e) {
+      _addErrorLog("Windows playback from queue failed for chunk ${chunkToPlay.originalChunkIndex}: $e");
+      if(mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Windows播放失败: $e")));
+        setState(() {_isLoading = false; _currentlyFetchingChunkText = null; _currentlyPlayingChunkIndex = -1;});
+        // _showFabs(); // Removed
+      }
+    }
+  }
+
+
+  Future<void> _fetchAndPlaySingleChunkWindows(
+      int chunkIndex, {
+        Duration? resumePosition,
+      }) async {
+    if (!mounted ||
+        chunkIndex < 0 ||
+        chunkIndex >= _processedTextChunks.length) {
+      setState(() => _isLoading = false);
+      // _showFabs(); // Removed
+      return;
+    }
+    setState(() {
+      _isLoading = true;
+      _currentlyPlayingChunkIndex = chunkIndex;
+      _currentlyFetchingChunkText =
+      _processedTextChunks[chunkIndex]['text'] as String?;
+    });
+
+    final client = _getHttpClient();
+    FetchAttemptResult fetchResult = await _attemptFetchChunkWithRetries(
+      _processedTextChunks[chunkIndex]['text'] as String,
+      chunkIndex + 1,
+      client,
+    );
+
+    if (mounted) {
+      if (fetchResult.status == RetryStatus.success &&
+          fetchResult.audioBytes != null) {
+        try {
+          final filePath = await _getTempFilePath(chunkIndex);
+          final file = File(filePath);
+          await file.writeAsBytes(fetchResult.audioBytes!);
+
+          await _windowsAudioPlayer.setSource(ap.DeviceFileSource(filePath));
+          await _windowsAudioPlayer.setPlaybackRate(_playbackSpeed);
+          if (resumePosition != null && resumePosition.inMilliseconds > 0) {
+            await _windowsAudioPlayer.seek(resumePosition);
+          }
+          await _windowsAudioPlayer
+              .resume();
+          setState(() {
+            _isLoading = false;
+            _currentlyFetchingChunkText = null;
+          });
+          _saveCurrentPlaybackProgress(chunkIndex, Duration.zero);
+          // Add to preloaded chunks so it can be cleaned up
+          _windowsPreloadedChunks.add(WindowsPreloadedChunk(originalChunkIndex: chunkIndex, filePath: filePath, text: _processedTextChunks[chunkIndex]['text'] as String));
+
+
+        } catch (e) {
+          _addErrorLog("Windows播放失败 (Windows playback failed): $e");
+          ScaffoldMessenger.of(context)
+              .showSnackBar(SnackBar(content: Text("Windows播放失败: $e")));
+          setState(() {
+            _isLoading = false;
+            _currentlyFetchingChunkText = null;
+            _currentlyPlayingChunkIndex = -1;
+          });
+          // _showFabs(); // Removed
+        }
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('获取音频片段失败。(Failed to fetch audio segment.)'),
+          ),
+        );
+        setState(() {
+          _isLoading = false;
+          _currentlyFetchingChunkText = null;
+          _currentlyPlayingChunkIndex = -1;
+        });
+        // _showFabs(); // Removed
+      }
+    }
+    if (client is IOClient)
+      client.close();
+    else if (client is http.Client && client != http.Client()) client.close();
+  }
+
   Future<void> _speakText() async {
-    if (_audioPlayer.playing || _isLoading) {
+    if (_isCurrentlyPlaying() || _isLoading) {
       await _stopPlayback();
     }
-    await _clearLastPlayedProgress(); // User explicitly starts from beginning
+    await _clearLastPlayedProgress();
 
     final textToSpeak = _mainTextHolderController.text;
 
@@ -1114,7 +1763,7 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
     }
 
     final String currentMainText = _mainTextHolderController.text;
-    if (!_audioPlayer.playing && !_isLoading) {
+    if (!_isCurrentlyPlaying() && !_isLoading) {
       await _resetTTSState();
     }
     _mainTextHolderController.text = currentMainText;
@@ -1127,7 +1776,7 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
       );
       _chunkKeys = List.generate(
         _processedTextChunks.length,
-        (_) => GlobalKey(),
+            (_) => GlobalKey(),
       );
       _highlightedCharacterInChunkIndex = -1;
     });
@@ -1149,11 +1798,11 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
   }
 
   Future<FetchAttemptResult> _attemptFetchChunkWithRetries(
-    String chunkText,
-    int chunkDisplayIndex,
-    http.Client client, {
-    bool isTest = false,
-  }) async {
+      String chunkText,
+      int chunkDisplayIndex,
+      http.Client client, {
+        bool isTest = false,
+      }) async {
     const int maxAutoRetriesPerCycle = 3;
     const Duration retryDelay = Duration(seconds: 3);
 
@@ -1331,6 +1980,10 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
   }
 
   Future<bool> _fetchAndAddChunksToPlaylist({required int count}) async {
+    if (Platform.isWindows) {
+      // This method is for just_audio's concatenating source, not used for Windows with audioplayers
+      return false;
+    }
     if (_playlist == null) return false;
 
     final client = _getHttpClient();
@@ -1339,10 +1992,10 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
 
     try {
       for (
-        int i = 0;
-        i < count &&
-            _currentChunkIndexToFetch <
-                _processedTextChunks.length; /* i incremented on success */
+      int i = 0;
+      i < count &&
+          _currentChunkIndexToFetch <
+              _processedTextChunks.length; /* i incremented on success */
       ) {
         if (!mounted) return false;
 
@@ -1433,13 +2086,20 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
   }
 
   Future<void> _fetchMoreChunksInBackground() async {
+    if (Platform.isWindows) {
+      // For Windows, preloading is handled differently (one by one into files)
+      if (_windowsPreloadedChunks.length < _prefetchChunkCount && _currentChunkIndexToFetch < _processedTextChunks.length) {
+        await _preloadNextWindowsChunk();
+      }
+      return;
+    }
     if (_isFetchingMore || _playlist == null || !mounted) return;
 
     _isFetchingMore = true;
     String? previewTextForThisBatch;
     if (_currentChunkIndexToFetch < _processedTextChunks.length) {
       previewTextForThisBatch =
-          _processedTextChunks[_currentChunkIndexToFetch]['text'] as String?;
+      _processedTextChunks[_currentChunkIndexToFetch]['text'] as String?;
     }
 
     if (mounted) {
@@ -1461,11 +2121,11 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
   }
 
   Future<void> _fetchMicrosoftVoices(
-    String region,
-    String key, {
-    bool initialLoad = false,
-    Function(bool)? setLoadingInDialog,
-  }) async {
+      String region,
+      String key, {
+        bool initialLoad = false,
+        Function(bool)? setLoadingInDialog,
+      }) async {
     if (key.isEmpty || region.isEmpty) {
       if (!initialLoad && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1524,7 +2184,7 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
         }
       } else {
         fetchError =
-            '获取 Microsoft 语音列表失败: ${response.statusCode} - ${_parseErrorFromResponse(response)} (Failed to fetch MS voices)';
+        '获取 Microsoft 语音列表失败: ${response.statusCode} - ${_parseErrorFromResponse(response)} (Failed to fetch MS voices)';
       }
     } catch (e) {
       fetchError = '获取 Microsoft 语音列表出错: $e (Error fetching MS voices)';
@@ -1547,35 +2207,48 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
   }
 
   Future<void> _stopPlayback() async {
-    if (_audioPlayer.playing && _currentlyPlayingChunkIndex != -1) {
-      await _saveCurrentPlaybackProgress(
-        _currentlyPlayingChunkIndex,
-        _audioPlayer.position,
-      );
+    if (Platform.isWindows) {
+      if (_windowsAudioPlayer.state == ap.PlayerState.playing &&
+          _currentlyPlayingChunkIndex != -1) {
+        await _saveCurrentPlaybackProgress(
+          _currentlyPlayingChunkIndex,
+          await _windowsAudioPlayer.getCurrentPosition() ?? Duration.zero,
+        );
+      }
+      await _windowsAudioPlayer.stop();
+    } else {
+      if (_justAudioPlayer.playing && _currentlyPlayingChunkIndex != -1) {
+        await _saveCurrentPlaybackProgress(
+          _currentlyPlayingChunkIndex,
+          _justAudioPlayer.position,
+        );
+      }
+      await _justAudioPlayer.stop();
     }
-    await _resetTTSState();
+    await _resetTTSState(); // This also sets _isLoading = false if it was true
     if (mounted) {
       setState(() {
-        _isLoading = false;
+        _isLoading = false; // Ensure isLoading is false after stopping
       });
+      // _showFabs(); // Removed
     }
   }
 
   Future<void> _testTTSConfiguration(
-    BuildContext dialogContext,
-    Function(bool) setLoadingState, {
-    required TTSProvider provider,
-    String? openAIApiKey,
-    String? openAIModel,
-    String? openAIVoice,
-    String? msKey,
-    String? msRegion,
-    String? msLang,
-    String? msVoice,
-    bool? useTestProxy,
-    String? testProxyHost,
-    String? testProxyPort,
-  }) async {
+      BuildContext dialogContext,
+      Function(bool) setLoadingState, {
+        required TTSProvider provider,
+        String? openAIApiKey,
+        String? openAIModel,
+        String? openAIVoice,
+        String? msKey,
+        String? msRegion,
+        String? msLang,
+        String? msVoice,
+        bool? useTestProxy,
+        String? testProxyHost,
+        String? testProxyPort,
+      }) async {
     setLoadingState(true);
     String testText = "Test";
     if (provider == TTSProvider.microsoft &&
@@ -1606,10 +2279,10 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
             },
             body: jsonEncode({
               'model':
-                  openAIModel ?? _MyHomePageState._defaultOpenAIModelSettings,
+              openAIModel ?? _MyHomePageState._defaultOpenAIModelSettings,
               'input': testText,
               'voice':
-                  openAIVoice ?? _MyHomePageState._defaultOpenAIVoiceSettings,
+              openAIVoice ?? _MyHomePageState._defaultOpenAIVoiceSettings,
               'response_format': 'mp3',
             }),
           );
@@ -1621,20 +2294,20 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
             msRegion == null ||
             msRegion.isEmpty) {
           testError =
-              "Microsoft Key 或 Region 未提供。(Microsoft Key or Region not provided.)";
+          "Microsoft Key 或 Region 未提供。(Microsoft Key or Region not provided.)";
         } else {
           String effectiveMsVoice =
               msVoice ??
-              _getMicrosoftDefaultVoiceForLanguage(
-                msLang ?? _MyHomePageState._defaultMsLanguage,
-              );
+                  _getMicrosoftDefaultVoiceForLanguage(
+                    msLang ?? _MyHomePageState._defaultMsLanguage,
+                  );
           if (effectiveMsVoice.isEmpty &&
               _msHardcodedVoicesByLanguage.containsKey(
                 msLang ?? _MyHomePageState._defaultMsLanguage,
               )) {
             effectiveMsVoice =
                 _msHardcodedVoicesByLanguage[msLang ??
-                        _MyHomePageState._defaultMsLanguage]!
+                    _MyHomePageState._defaultMsLanguage]!
                     .first;
           }
           if (effectiveMsVoice.isEmpty) {
@@ -1713,30 +2386,219 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
     }
   }
 
+  List<Widget> _buildOpenAISettingsUI(
+      StateSetter setDialogState,
+      TextEditingController apiKeyController,
+      String currentModel,
+      String currentVoice,
+      bool isTesting,
+      Function(String) onModelChanged,
+      Function(String) onVoiceChanged,
+      VoidCallback onTestPressed,
+      ) {
+    return [
+      TextField(
+        controller: apiKeyController,
+        decoration: InputDecoration(
+          labelText: _tr('openAIApiKeyLabel'),
+          border: OutlineInputBorder(),
+          hintText: _tr('openAIApiKeyHint'),
+        ),
+        obscureText: true,
+      ),
+      const SizedBox(height: 16),
+      DropdownButtonFormField<String>(
+        value: currentModel,
+        decoration: InputDecoration(
+          labelText: _tr('openAIModelLabel'),
+          border: OutlineInputBorder(),
+        ),
+        items: _openAIModels.map((String model) {
+          return DropdownMenuItem<String>(
+            value: model,
+            child: Text(model),
+          );
+        }).toList(),
+        onChanged: (String? newValue) {
+          if (newValue != null) {
+            onModelChanged(newValue);
+          }
+        },
+      ),
+      const SizedBox(height: 16),
+      DropdownButtonFormField<String>(
+        value: currentVoice,
+        decoration: InputDecoration(
+          labelText: _tr('openAIVoiceLabel'),
+          border: OutlineInputBorder(),
+        ),
+        items: _openAIVoices.map((String voice) {
+          return DropdownMenuItem<String>(
+            value: voice,
+            child: Text(voice),
+          );
+        }).toList(),
+        onChanged: (String? newValue) {
+          if (newValue != null) {
+            onVoiceChanged(newValue);
+          }
+        },
+      ),
+      const SizedBox(height: 8),
+      ElevatedButton.icon(
+        icon: isTesting
+            ? const SizedBox(
+          width: 18,
+          height: 18,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        )
+            : const Icon(Icons.verified_user_outlined),
+        label: Text(_tr('testOpenAIConfigButton')),
+        onPressed: isTesting ? null : onTestPressed,
+      ),
+    ];
+  }
+
+  List<Widget> _buildMicrosoftSettingsUI(
+      StateSetter setDialogState,
+      TextEditingController subKeyController,
+      TextEditingController regionController,
+      String currentLanguage,
+      String currentVoice,
+      bool isFetchingVoices,
+      bool isTesting,
+      Function(String) onLanguageChanged,
+      Function(String) onVoiceChanged,
+      VoidCallback onRefreshVoices,
+      VoidCallback onTestPressed,
+      ) {
+    List<String> voicesForSelectedLang = _dynamicMsVoicesByLanguage[currentLanguage] ?? _msHardcodedVoicesByLanguage[currentLanguage] ?? [];
+    if (voicesForSelectedLang.isEmpty && _msHardcodedVoicesByLanguage.containsKey(currentLanguage)) {
+      voicesForSelectedLang = _msHardcodedVoicesByLanguage[currentLanguage]!;
+    }
+    String effectiveCurrentVoice = currentVoice;
+    if (voicesForSelectedLang.isNotEmpty && !voicesForSelectedLang.contains(currentVoice)) {
+      effectiveCurrentVoice = voicesForSelectedLang.first;
+    } else if (voicesForSelectedLang.isEmpty) {
+      effectiveCurrentVoice = '';
+    }
+
+
+    return [
+      TextField(
+        controller: subKeyController,
+        decoration: InputDecoration(
+          labelText: _tr('msSubKeyLabel'),
+          border: OutlineInputBorder(),
+        ),
+        obscureText: true,
+      ),
+      const SizedBox(height: 16),
+      TextField(
+        controller: regionController,
+        decoration: InputDecoration(
+          labelText: _tr('msRegionLabel'),
+          border: OutlineInputBorder(),
+          hintText: _tr('msRegionHint'),
+        ),
+      ),
+      const SizedBox(height: 16),
+      Row(
+        children: [
+          Expanded(
+            child: DropdownButtonFormField<String>(
+              value: currentLanguage,
+              decoration: InputDecoration(
+                labelText: _tr('msLanguageLabel'),
+                border: OutlineInputBorder(),
+              ),
+              items: (_dynamicMsVoicesByLanguage.keys.isNotEmpty ? _dynamicMsVoicesByLanguage.keys.toList() : _msHardcodedVoicesByLanguage.keys.toList()).map((String langCode) {
+                return DropdownMenuItem<String>(
+                  value: langCode,
+                  child: Text(langCode),
+                );
+              }).toList(),
+              onChanged: (String? newValue) {
+                if (newValue != null) {
+                  onLanguageChanged(newValue);
+                }
+              },
+            ),
+          ),
+          IconButton(
+            icon: isFetchingVoices
+                ? const SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+                : const Icon(Icons.refresh),
+            tooltip: _tr('refreshVoiceListTooltip'),
+            onPressed: isFetchingVoices ? null : onRefreshVoices,
+          )
+        ],
+      ),
+      const SizedBox(height: 16),
+      if (voicesForSelectedLang.isNotEmpty)
+        DropdownButtonFormField<String>(
+          value: effectiveCurrentVoice,
+          decoration: InputDecoration(
+            labelText: _tr('msVoiceNameLabel'),
+            border: OutlineInputBorder(),
+          ),
+          items: voicesForSelectedLang.map((String voiceName) {
+            return DropdownMenuItem<String>(
+              value: voiceName,
+              child: Text(voiceName),
+            );
+          }).toList(),
+          onChanged: (String? newValue) {
+            if (newValue != null) {
+              onVoiceChanged(newValue);
+            }
+          },
+        )
+      else
+        Text(
+          _tr('msVoiceNotAvailable'),
+          style: TextStyle(color: Colors.orange),
+        ),
+      const SizedBox(height: 8),
+      ElevatedButton.icon(
+        icon: isTesting
+            ? const SizedBox(
+          width: 18,
+          height: 18,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        )
+            : const Icon(Icons.verified_user_outlined),
+        label: Text(_tr('testMSConfigButton')),
+        onPressed: isTesting ? null : onTestPressed,
+      ),
+    ];
+  }
+
+
   void _showSettingsDialog() {
     TTSProvider dialogTTSProvider = _selectedTTSProvider;
     final dialogOpenAIApiKeyController = TextEditingController(text: _apiKey);
-    final dialogMsSubKeyController = TextEditingController(
-      text: _msSubscriptionKey,
-    );
+    final dialogMsSubKeyController = TextEditingController(text: _msSubscriptionKey);
     final dialogMsRegionController = TextEditingController(text: _msRegion);
     String dialogMsSelectedLanguage = _msSelectedLanguage;
     String dialogMsSelectedVoice = _msSelectedVoiceName;
+
 
     String localDialogSelectedOpenAIModel = _selectedModel;
     String localDialogSelectedOpenAIVoice = _selectedVoice;
     bool dialogUseProxy = _useProxy;
     final dialogProxyHostController = TextEditingController(text: _proxyHost);
     final dialogProxyPortController = TextEditingController(text: _proxyPort);
-    final dialogMaxCharsController = TextEditingController(
-      text: _maxCharsPerRequest.toString(),
-    );
-    final dialogPrefetchCountController = TextEditingController(
-      text: _prefetchChunkCount.toString(),
-    );
+    final dialogMaxCharsController = TextEditingController(text: _maxCharsPerRequest.toString());
+    final dialogPrefetchCountController = TextEditingController(text: _prefetchChunkCount.toString());
     ReadingTheme dialogReadingTheme = _currentReadingTheme;
-    // double dialogBrightnessOverlayOpacity = _brightnessOverlayOpacity; // Removed
+    Locale dialogSelectedLocale = _selectedLocale;
     bool isTestingConfig = false;
+
 
     showDialog(
       context: context,
@@ -1744,297 +2606,109 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
       builder: (BuildContext dialogContext) {
         return StatefulBuilder(
           builder: (context, setDialogState) {
-            List<Widget> providerSpecificSettings = [];
+            List<Widget> providerSettingsWidgets;
             if (dialogTTSProvider == TTSProvider.openai) {
-              providerSpecificSettings.addAll([
-                TextField(
-                  controller: dialogOpenAIApiKeyController,
-                  decoration: const InputDecoration(
-                    labelText: 'OpenAI API Key',
-                    border: OutlineInputBorder(),
-                    hintText: 'sk-xxxxxxxxxx',
-                  ),
-                  obscureText: true,
+              providerSettingsWidgets = _buildOpenAISettingsUI(
+                setDialogState,
+                dialogOpenAIApiKeyController,
+                localDialogSelectedOpenAIModel,
+                localDialogSelectedOpenAIVoice,
+                isTestingConfig,
+                    (newModel) => setDialogState(() => localDialogSelectedOpenAIModel = newModel),
+                    (newVoice) => setDialogState(() => localDialogSelectedOpenAIVoice = newVoice),
+                    () => _testTTSConfiguration(
+                  dialogContext,
+                      (loading) => setDialogState(() => isTestingConfig = loading),
+                  provider: TTSProvider.openai,
+                  openAIApiKey: dialogOpenAIApiKeyController.text,
+                  openAIModel: localDialogSelectedOpenAIModel,
+                  openAIVoice: localDialogSelectedOpenAIVoice,
+                  useTestProxy: dialogUseProxy,
+                  testProxyHost: dialogProxyHostController.text,
+                  testProxyPort: dialogProxyPortController.text,
                 ),
-                const SizedBox(height: 16),
-                DropdownButtonFormField<String>(
-                  value: localDialogSelectedOpenAIModel,
-                  decoration: const InputDecoration(
-                    labelText: 'OpenAI TTS 模型 (OpenAI TTS Model)',
-                    border: OutlineInputBorder(),
-                  ),
-                  items:
-                      _openAIModels.map((String model) {
-                        return DropdownMenuItem<String>(
-                          value: model,
-                          child: Text(model),
-                        );
-                      }).toList(),
-                  onChanged: (String? newValue) {
-                    if (newValue != null) {
-                      setDialogState(() {
-                        localDialogSelectedOpenAIModel = newValue;
-                      });
-                    }
-                  },
+              );
+            } else { // Microsoft TTS
+              providerSettingsWidgets = _buildMicrosoftSettingsUI(
+                setDialogState,
+                dialogMsSubKeyController,
+                dialogMsRegionController,
+                dialogMsSelectedLanguage,
+                dialogMsSelectedVoice,
+                _isFetchingMsVoices, // Use state variable for fetching voices
+                isTestingConfig,
+                    (newLang) => setDialogState(() {
+                  dialogMsSelectedLanguage = newLang;
+                  List<String> voicesForNewLang = _dynamicMsVoicesByLanguage[newLang] ?? _msHardcodedVoicesByLanguage[newLang] ?? [];
+                  dialogMsSelectedVoice = voicesForNewLang.isNotEmpty ? voicesForNewLang.first : '';
+                }),
+                    (newVoice) => setDialogState(() => dialogMsSelectedVoice = newVoice),
+                    () async {
+                  setDialogState(() => _isFetchingMsVoices = true);
+                  await _fetchMicrosoftVoices(
+                    dialogMsRegionController.text,
+                    dialogMsSubKeyController.text,
+                    setLoadingInDialog: (loading) => setDialogState(() => _isFetchingMsVoices = loading),
+                  );
+                  List<String> voicesForLang = _dynamicMsVoicesByLanguage[dialogMsSelectedLanguage] ?? _msHardcodedVoicesByLanguage[dialogMsSelectedLanguage] ?? [];
+                  setDialogState(() {
+                    dialogMsSelectedVoice = voicesForLang.isNotEmpty ? voicesForLang.first : '';
+                  });
+                },
+                    () => _testTTSConfiguration(
+                  dialogContext,
+                      (loading) => setDialogState(() => isTestingConfig = loading),
+                  provider: TTSProvider.microsoft,
+                  msKey: dialogMsSubKeyController.text,
+                  msRegion: dialogMsRegionController.text,
+                  msLang: dialogMsSelectedLanguage,
+                  msVoice: dialogMsSelectedVoice,
+                  useTestProxy: dialogUseProxy,
+                  testProxyHost: dialogProxyHostController.text,
+                  testProxyPort: dialogProxyPortController.text,
                 ),
-                const SizedBox(height: 16),
-                DropdownButtonFormField<String>(
-                  value: localDialogSelectedOpenAIVoice,
-                  decoration: const InputDecoration(
-                    labelText: 'OpenAI TTS 语音 (OpenAI TTS Voice)',
-                    border: OutlineInputBorder(),
-                  ),
-                  items:
-                      _openAIVoices.map((String voice) {
-                        return DropdownMenuItem<String>(
-                          value: voice,
-                          child: Text(voice),
-                        );
-                      }).toList(),
-                  onChanged: (String? newValue) {
-                    if (newValue != null) {
-                      setDialogState(() {
-                        localDialogSelectedOpenAIVoice = newValue;
-                      });
-                    }
-                  },
-                ),
-                const SizedBox(height: 8),
-                ElevatedButton.icon(
-                  icon:
-                      isTestingConfig
-                          ? const SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                          : const Icon(Icons.verified_user_outlined),
-                  label: const Text("检测 OpenAI 配置"),
-                  onPressed:
-                      isTestingConfig
-                          ? null
-                          : () {
-                            _testTTSConfiguration(
-                              dialogContext,
-                              (loading) => setDialogState(
-                                () => isTestingConfig = loading,
-                              ),
-                              provider: TTSProvider.openai,
-                              openAIApiKey: dialogOpenAIApiKeyController.text,
-                              openAIModel: localDialogSelectedOpenAIModel,
-                              openAIVoice: localDialogSelectedOpenAIVoice,
-                              useTestProxy: dialogUseProxy,
-                              testProxyHost: dialogProxyHostController.text,
-                              testProxyPort: dialogProxyPortController.text,
-                            );
-                          },
-                ),
-              ]);
-            } else {
-              // Microsoft TTS
-              List<String> currentMsVoices =
-                  _dynamicMsVoicesByLanguage[dialogMsSelectedLanguage] ??
-                  _msHardcodedVoicesByLanguage[dialogMsSelectedLanguage] ??
-                  [];
-              if (currentMsVoices.isEmpty &&
-                  _msHardcodedVoicesByLanguage.containsKey(
-                    dialogMsSelectedLanguage,
-                  )) {
-                currentMsVoices =
-                    _msHardcodedVoicesByLanguage[dialogMsSelectedLanguage]!;
-              }
-              if (currentMsVoices.isNotEmpty &&
-                  !currentMsVoices.contains(dialogMsSelectedVoice)) {
-                dialogMsSelectedVoice = currentMsVoices.first;
-              } else if (currentMsVoices.isEmpty) {
-                dialogMsSelectedVoice = '';
-              }
-
-              providerSpecificSettings.addAll([
-                TextField(
-                  controller: dialogMsSubKeyController,
-                  decoration: const InputDecoration(
-                    labelText: 'Microsoft 订阅密钥 (MS Subscription Key)',
-                    border: OutlineInputBorder(),
-                  ),
-                  obscureText: true,
-                ),
-                const SizedBox(height: 16),
-                TextField(
-                  controller: dialogMsRegionController,
-                  decoration: const InputDecoration(
-                    labelText: 'Microsoft 服务区域 (MS Service Region)',
-                    border: OutlineInputBorder(),
-                    hintText: '例如: eastus, westus2',
-                  ),
-                ),
-                const SizedBox(height: 16),
-                Row(
-                  children: [
-                    Expanded(
-                      child: DropdownButtonFormField<String>(
-                        value: dialogMsSelectedLanguage,
-                        decoration: const InputDecoration(
-                          labelText: 'Microsoft TTS 语言 (MS TTS Language)',
-                          border: OutlineInputBorder(),
-                        ),
-                        items:
-                            (_dynamicMsVoicesByLanguage.keys.isNotEmpty
-                                    ? _dynamicMsVoicesByLanguage.keys.toList()
-                                    : _msHardcodedVoicesByLanguage.keys
-                                        .toList())
-                                .map((String langCode) {
-                                  return DropdownMenuItem<String>(
-                                    value: langCode,
-                                    child: Text(langCode),
-                                  );
-                                })
-                                .toList(),
-                        onChanged: (String? newValue) {
-                          if (newValue != null) {
-                            setDialogState(() {
-                              dialogMsSelectedLanguage = newValue;
-                              List<String> voicesForNewLang =
-                                  _dynamicMsVoicesByLanguage[newValue] ??
-                                  _msHardcodedVoicesByLanguage[newValue] ??
-                                  [];
-                              dialogMsSelectedVoice =
-                                  voicesForNewLang.isNotEmpty
-                                      ? voicesForNewLang.first
-                                      : '';
-                            });
-                          }
-                        },
-                      ),
-                    ),
-                    IconButton(
-                      icon:
-                          _isFetchingMsVoices
-                              ? const SizedBox(
-                                width: 18,
-                                height: 18,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                ),
-                              )
-                              : const Icon(Icons.refresh),
-                      tooltip: "刷新语音列表 (Refresh Voice List)",
-                      onPressed:
-                          _isFetchingMsVoices
-                              ? null
-                              : () async {
-                                setDialogState(
-                                  () => _isFetchingMsVoices = true,
-                                );
-                                await _fetchMicrosoftVoices(
-                                  dialogMsRegionController.text,
-                                  dialogMsSubKeyController.text,
-                                  setLoadingInDialog:
-                                      (loading) => setDialogState(
-                                        () => _isFetchingMsVoices = loading,
-                                      ),
-                                );
-                                List<String> voicesForLang =
-                                    _dynamicMsVoicesByLanguage[dialogMsSelectedLanguage] ??
-                                    _msHardcodedVoicesByLanguage[dialogMsSelectedLanguage] ??
-                                    [];
-                                setDialogState(() {
-                                  dialogMsSelectedVoice =
-                                      voicesForLang.isNotEmpty
-                                          ? voicesForLang.first
-                                          : '';
-                                });
-                              },
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 16),
-                if (currentMsVoices.isNotEmpty)
-                  DropdownButtonFormField<String>(
-                    value: dialogMsSelectedVoice,
-                    decoration: const InputDecoration(
-                      labelText: 'Microsoft TTS 语音名称 (MS TTS Voice Name)',
-                      border: OutlineInputBorder(),
-                    ),
-                    items:
-                        currentMsVoices.map((String voiceName) {
-                          return DropdownMenuItem<String>(
-                            value: voiceName,
-                            child: Text(voiceName),
-                          );
-                        }).toList(),
-                    onChanged: (String? newValue) {
-                      if (newValue != null) {
-                        setDialogState(() {
-                          dialogMsSelectedVoice = newValue;
-                        });
-                      }
-                    },
-                  )
-                else
-                  const Text(
-                    "请先选择语言并刷新语音列表。(Please select language and refresh voice list.)",
-                    style: TextStyle(color: Colors.orange),
-                  ),
-                const SizedBox(height: 8),
-                ElevatedButton.icon(
-                  icon:
-                      isTestingConfig
-                          ? const SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                          : const Icon(Icons.verified_user_outlined),
-                  label: const Text("检测 Microsoft 配置"),
-                  onPressed:
-                      isTestingConfig
-                          ? null
-                          : () {
-                            _testTTSConfiguration(
-                              dialogContext,
-                              (loading) => setDialogState(
-                                () => isTestingConfig = loading,
-                              ),
-                              provider: TTSProvider.microsoft,
-                              msKey: dialogMsSubKeyController.text,
-                              msRegion: dialogMsRegionController.text,
-                              msLang: dialogMsSelectedLanguage,
-                              msVoice: dialogMsSelectedVoice,
-                              useTestProxy: dialogUseProxy,
-                              testProxyHost: dialogProxyHostController.text,
-                              testProxyPort: dialogProxyPortController.text,
-                            );
-                          },
-                ),
-              ]);
+              );
             }
 
+
             return AlertDialog(
-              title: const Text('设置 (Settings)'),
+              title: Text(_tr('settingsTitle')),
               content: SingleChildScrollView(
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: <Widget>[
-                    DropdownButtonFormField<TTSProvider>(
-                      value: dialogTTSProvider,
-                      decoration: const InputDecoration(
-                        labelText: 'TTS 服务提供商 (TTS Provider)',
+                    DropdownButtonFormField<Locale>(
+                      value: dialogSelectedLocale,
+                      decoration: InputDecoration(
+                        labelText: _tr('interfaceLanguageLabel'),
                         border: OutlineInputBorder(),
                       ),
-                      items:
-                          TTSProvider.values.map((TTSProvider provider) {
-                            return DropdownMenuItem<TTSProvider>(
-                              value: provider,
-                              child: Text(
-                                provider == TTSProvider.openai
-                                    ? 'OpenAI'
-                                    : 'Microsoft Azure',
-                              ),
-                            );
-                          }).toList(),
+                      items: [
+                        DropdownMenuItem(value: Locale('zh'), child: Text('中文')),
+                        DropdownMenuItem(value: Locale('en'), child: Text('English')),
+                      ],
+                      onChanged: (Locale? newValue) {
+                        if (newValue != null) {
+                          setDialogState(() {
+                            dialogSelectedLocale = newValue;
+                          });
+                        }
+                      },
+                    ),
+                    const SizedBox(height: 16),
+                    DropdownButtonFormField<TTSProvider>(
+                      value: dialogTTSProvider,
+                      decoration: InputDecoration(
+                        labelText: _tr('ttsProviderLabel'),
+                        border: OutlineInputBorder(),
+                      ),
+                      items: TTSProvider.values.map((TTSProvider provider) {
+                        return DropdownMenuItem<TTSProvider>(
+                          value: provider,
+                          child: Text(provider == TTSProvider.openai ? 'OpenAI' : 'Microsoft Azure'),
+                        );
+                      }).toList(),
                       onChanged: (TTSProvider? newValue) {
                         if (newValue != null) {
                           setDialogState(() {
@@ -2044,20 +2718,18 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
                       },
                     ),
                     const SizedBox(height: 16),
-                    ...providerSpecificSettings,
-                    // Display provider-specific fields
+                    ...providerSettingsWidgets,
                     const SizedBox(height: 16),
                     TextFormField(
                       controller: dialogMaxCharsController,
-                      decoration: const InputDecoration(
-                        labelText: '最大请求字符数 (Max Chars/Request)',
+                      decoration: InputDecoration(
+                        labelText: _tr('maxCharsLabel'),
                         border: OutlineInputBorder(),
-                        hintText: '例如: 4000',
+                        hintText: _tr('maxCharsHint'),
                       ),
                       keyboardType: TextInputType.number,
                       validator: (value) {
-                        if (value == null || value.isEmpty)
-                          return '不能为空 (Cannot be empty)';
+                        if (value == null || value.isEmpty) return '不能为空 (Cannot be empty)';
                         final n = int.tryParse(value);
                         if (n == null) return '请输入数字 (Please enter a number)';
                         if (n <= 0) return '必须大于0 (Must be > 0)';
@@ -2067,15 +2739,14 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
                     const SizedBox(height: 16),
                     TextFormField(
                       controller: dialogPrefetchCountController,
-                      decoration: const InputDecoration(
-                        labelText: '预加载片段数 (Prefetch Chunks)',
+                      decoration: InputDecoration(
+                        labelText: _tr('prefetchChunksLabel'),
                         border: OutlineInputBorder(),
-                        hintText: '例如: 2',
+                        hintText: _tr('prefetchChunksHint'),
                       ),
                       keyboardType: TextInputType.number,
                       validator: (value) {
-                        if (value == null || value.isEmpty)
-                          return '不能为空 (Cannot be empty)';
+                        if (value == null || value.isEmpty) return '不能为空 (Cannot be empty)';
                         final n = int.tryParse(value);
                         if (n == null) return '请输入数字 (Please enter a number)';
                         if (n < 1) return '至少为1 (Must be at least 1)';
@@ -2084,19 +2755,17 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
                     ),
                     const SizedBox(height: 16),
                     SwitchListTile(
-                      title: const Text('使用 HTTP 代理 (Use HTTP Proxy)'),
+                      title: Text(_tr('useProxyLabel')),
                       value: dialogUseProxy,
                       onChanged: (bool value) {
                         setDialogState(() {
                           dialogUseProxy = value;
                           if (dialogUseProxy) {
                             if (dialogProxyHostController.text.isEmpty) {
-                              dialogProxyHostController.text =
-                                  _defaultProxyHostSettings;
+                              dialogProxyHostController.text = _defaultProxyHostSettings;
                             }
                             if (dialogProxyPortController.text.isEmpty) {
-                              dialogProxyPortController.text =
-                                  _defaultProxyPortSettings;
+                              dialogProxyPortController.text = _defaultProxyPortSettings;
                             }
                           }
                         });
@@ -2107,8 +2776,8 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
                       const SizedBox(height: 8),
                       TextField(
                         controller: dialogProxyHostController,
-                        decoration: const InputDecoration(
-                          labelText: '代理服务器地址 (Proxy Host)',
+                        decoration: InputDecoration(
+                          labelText: _tr('proxyHostLabel'),
                           border: OutlineInputBorder(),
                           hintText: _defaultProxyHostSettings,
                         ),
@@ -2116,8 +2785,8 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
                       const SizedBox(height: 8),
                       TextField(
                         controller: dialogProxyPortController,
-                        decoration: const InputDecoration(
-                          labelText: '代理服务器端口 (Proxy Port)',
+                        decoration: InputDecoration(
+                          labelText: _tr('proxyPortLabel'),
                           border: OutlineInputBorder(),
                           hintText: _defaultProxyPortSettings,
                         ),
@@ -2126,85 +2795,54 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
                     ],
                     const SizedBox(height: 20),
                     const Divider(),
-                    Text(
-                      '阅读主题 (Reading Theme)',
-                      style: Theme.of(context).textTheme.titleMedium,
-                    ),
+                    Text(_tr('readingThemeLabel'), style: Theme.of(context).textTheme.titleMedium),
                     DropdownButtonFormField<String>(
-                      value:
-                          _predefinedThemes.entries
-                              .firstWhere(
-                                (entry) =>
-                                    entry.value.backgroundColor ==
-                                        dialogReadingTheme.backgroundColor &&
-                                    entry.value.textColor ==
-                                        dialogReadingTheme.textColor,
-                                orElse: () => _predefinedThemes.entries.first,
-                              )
-                              .key, // Find current theme name
-                      decoration: const InputDecoration(
-                        labelText: '选择预设主题 (Select Preset Theme)',
-                        border: OutlineInputBorder(),
-                      ),
-                      items:
-                          _predefinedThemes.keys.map((String key) {
-                            return DropdownMenuItem<String>(
-                              value: key,
-                              child: Text(key),
-                            );
-                          }).toList(),
+                      value: _predefinedThemes.entries.firstWhere((entry) => entry.value.backgroundColor == dialogReadingTheme.backgroundColor && entry.value.textColor == dialogReadingTheme.textColor, orElse: () => _predefinedThemes.entries.first).key, // Find current theme name
+                      decoration: InputDecoration(labelText: _tr('selectPresetThemeLabel'), border: OutlineInputBorder()),
+                      items: _predefinedThemes.keys.map((String key) {
+                        return DropdownMenuItem<String>(
+                          value: key,
+                          child: Text(key),
+                        );
+                      }).toList(),
                       onChanged: (String? newKey) {
-                        if (newKey != null &&
-                            _predefinedThemes.containsKey(newKey)) {
+                        if (newKey != null && _predefinedThemes.containsKey(newKey)) {
                           setDialogState(() {
                             dialogReadingTheme = _predefinedThemes[newKey]!;
                           });
                         }
                       },
                     ),
-                    // const SizedBox(height: 16), // Removed Brightness Slider
-                    // Text('界面亮度 (App Brightness: ${(1 - dialogBrightnessOverlayOpacity).toStringAsFixed(2)})'), // Removed
-                    // Slider( // Removed
-                    //   value: dialogBrightnessOverlayOpacity,
-                    //   min: 0.0,
-                    //   max: 0.8,
-                    //   divisions: 8,
-                    //   label: "亮度因子: ${dialogBrightnessOverlayOpacity.toStringAsFixed(2)}",
-                    //   onChanged: (double value) {
-                    //     setDialogState(() {
-                    //       dialogBrightnessOverlayOpacity = value;
-                    //     });
-                    //   },
-                    // ),
                     const SizedBox(height: 20),
                     const Divider(),
                     ListTile(
                       leading: const Icon(Icons.save_alt),
-                      title: const Text("保存当前配置 (Save Current Configuration)"),
+                      title: Text(_tr('saveCurrentConfigButton')),
                       onTap: () {
                         _showSaveProfileDialog();
                       },
                     ),
                     ListTile(
                       leading: const Icon(Icons.folder_open_outlined),
-                      title: const Text("加载/管理配置 (Load/Manage Configurations)"),
+                      title: Text(_tr('loadManageConfigButton')),
                       onTap: () {
                         _showProfilesDialog();
                       },
                     ),
                     ListTile(
                       leading: const Icon(Icons.receipt_long_outlined),
-                      title: const Text("查看/清除日志 (View/Clear Logs)"),
+                      title: Text(_tr('viewClearLogsButton')),
                       onTap: () {
                         _showErrorLogsDialog();
                       },
                     ),
+
                   ],
                 ),
               ),
               actions: <Widget>[
                 TextButton(
-                  child: const Text('重置活动设置 (Reset Active Settings)'),
+                  child: Text(_tr('resetActiveSettingsButton')),
                   onPressed: () async {
                     await _resetSettingsToDefaults();
                     setDialogState(() {
@@ -2219,30 +2857,24 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
                       dialogUseProxy = _useProxy;
                       dialogProxyHostController.text = _proxyHost;
                       dialogProxyPortController.text = _proxyPort;
-                      dialogMaxCharsController.text =
-                          _maxCharsPerRequest.toString();
-                      dialogPrefetchCountController.text =
-                          _prefetchChunkCount.toString();
+                      dialogMaxCharsController.text = _maxCharsPerRequest.toString();
+                      dialogPrefetchCountController.text = _prefetchChunkCount.toString();
                       dialogReadingTheme = _currentReadingTheme;
-                      // dialogBrightnessOverlayOpacity = _brightnessOverlayOpacity; // Removed
+                      dialogSelectedLocale = _selectedLocale;
                     });
                   },
                 ),
                 TextButton(
-                  child: const Text('取消 (Cancel)'),
+                  child: Text(_tr('cancelButton')),
                   onPressed: () {
                     Navigator.of(context).pop();
                   },
                 ),
                 ElevatedButton(
-                  child: const Text('应用活动设置 (Apply Active Settings)'),
+                  child: Text(_tr('applyButton')),
                   onPressed: () {
-                    final int maxChars =
-                        int.tryParse(dialogMaxCharsController.text) ??
-                        _maxCharsPerRequest;
-                    final int prefetchCount =
-                        int.tryParse(dialogPrefetchCountController.text) ??
-                        _prefetchChunkCount;
+                    final int maxChars = int.tryParse(dialogMaxCharsController.text) ?? _maxCharsPerRequest;
+                    final int prefetchCount = int.tryParse(dialogPrefetchCountController.text) ?? _MyHomePageState._defaultPrefetchChunkCountSettings;
 
                     _saveSettingsDialogValues(
                       ttsProvider: dialogTTSProvider,
@@ -2256,16 +2888,10 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
                       useProxy: dialogUseProxy,
                       proxyHost: dialogProxyHostController.text,
                       proxyPort: dialogProxyPortController.text,
-                      maxChars:
-                          maxChars > 0
-                              ? maxChars
-                              : _defaultMaxCharsPerRequestSettings,
-                      prefetchCount:
-                          prefetchCount >= 1
-                              ? prefetchCount
-                              : _defaultPrefetchChunkCountSettings,
+                      maxChars: maxChars > 0 ? maxChars : _defaultMaxCharsPerRequestSettings,
+                      prefetchCount: prefetchCount >= 1 ? prefetchCount : _defaultPrefetchChunkCountSettings,
                       readingTheme: dialogReadingTheme,
-                      // brightnessOverlayOpacity: _brightnessOverlayOpacity, // Corrected: pass the state variable
+                      appLocale: dialogSelectedLocale,
                     );
                     Navigator.of(context).pop();
                   },
@@ -2279,9 +2905,7 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
   }
 
   void _showPlaybackSpeedDialog() {
-    final TextEditingController dialogSpeedController = TextEditingController(
-      text: _playbackSpeed.toStringAsFixed(2),
-    );
+    final TextEditingController dialogSpeedController = TextEditingController(text: _playbackSpeed.toStringAsFixed(2));
     double tempSpeed = _playbackSpeed;
 
     showDialog(
@@ -2290,27 +2914,21 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
         return StatefulBuilder(
           builder: (context, setDialogState) {
             return AlertDialog(
-              title: const Text('设置播放倍速 (Set Playback Speed)'),
+              title: Text(_tr('playbackSpeedDialogTitle')),
               content: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Text(
-                    '当前倍速 (Current Speed): ${tempSpeed.toStringAsFixed(2)}x',
-                  ),
+                  Text('${_tr('currentSpeedLabel')}: ${tempSpeed.toStringAsFixed(2)}x'),
                   Slider(
                     value: tempSpeed,
                     min: _minPlaybackSpeed,
                     max: _maxPlaybackSpeed,
-                    divisions:
-                        ((_maxPlaybackSpeed - _minPlaybackSpeed) / 0.05)
-                            .round(),
+                    divisions: ((_maxPlaybackSpeed - _minPlaybackSpeed) / 0.05).round(),
                     label: tempSpeed.toStringAsFixed(2),
                     onChanged: (value) {
                       setDialogState(() {
                         tempSpeed = value;
-                        dialogSpeedController.text = tempSpeed.toStringAsFixed(
-                          2,
-                        );
+                        dialogSpeedController.text = tempSpeed.toStringAsFixed(2);
                       });
                     },
                   ),
@@ -2318,9 +2936,7 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
                     width: 100,
                     child: TextField(
                       controller: dialogSpeedController,
-                      keyboardType: const TextInputType.numberWithOptions(
-                        decimal: true,
-                      ),
+                      keyboardType: const TextInputType.numberWithOptions(decimal: true),
                       decoration: const InputDecoration(
                         border: OutlineInputBorder(),
                         contentPadding: EdgeInsets.symmetric(horizontal: 8),
@@ -2330,22 +2946,16 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
                         final speed = double.tryParse(value);
                         if (speed != null) {
                           setDialogState(() {
-                            tempSpeed = speed.clamp(
-                              _minPlaybackSpeed,
-                              _maxPlaybackSpeed,
-                            );
+                            tempSpeed = speed.clamp(_minPlaybackSpeed, _maxPlaybackSpeed);
                           });
                         }
                       },
                       onSubmitted: (value) {
                         final speed = double.tryParse(value);
                         if (speed != null) {
-                          _setPlaybackSpeed(
-                            speed.clamp(_minPlaybackSpeed, _maxPlaybackSpeed),
-                          );
+                          _setPlaybackSpeed(speed.clamp(_minPlaybackSpeed, _maxPlaybackSpeed));
                         } else {
-                          dialogSpeedController.text = tempSpeed
-                              .toStringAsFixed(2);
+                          dialogSpeedController.text = tempSpeed.toStringAsFixed(2);
                         }
                       },
                     ),
@@ -2355,21 +2965,19 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
               actions: [
                 TextButton(
                   onPressed: () => Navigator.of(context).pop(),
-                  child: const Text('取消 (Cancel)'),
+                  child: Text(_tr('cancelButton')),
                 ),
                 ElevatedButton(
                   onPressed: () {
                     final speed = double.tryParse(dialogSpeedController.text);
                     if (speed != null) {
-                      _setPlaybackSpeed(
-                        speed.clamp(_minPlaybackSpeed, _maxPlaybackSpeed),
-                      );
+                      _setPlaybackSpeed(speed.clamp(_minPlaybackSpeed, _maxPlaybackSpeed));
                     } else {
                       _setPlaybackSpeed(tempSpeed);
                     }
                     Navigator.of(context).pop();
                   },
-                  child: const Text('应用 (Apply)'),
+                  child: Text(_tr('applyButton')),
                 ),
               ],
             );
@@ -2379,19 +2987,102 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
     );
   }
 
-  void _showTextInputDialog() {
-    final TextEditingController dialogInputController = TextEditingController(
-      text: _mainTextHolderController.text,
-    );
+  void _showVolumeDialog() {
+    final TextEditingController dialogVolumeController = TextEditingController(text: (_volume * 100).toStringAsFixed(0));
+    double tempVolume = _volume;
 
     showDialog(
       context: context,
-      barrierDismissible: false,
       builder: (BuildContext context) {
         return StatefulBuilder(
           builder: (context, setDialogState) {
             return AlertDialog(
-              title: const Text('输入或加载文本 (Input or Load Text)'),
+              title: Text(_tr('volumeDialogTitle')),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text('${_tr('currentVolumeLabel')}: ${(tempVolume * 100).toStringAsFixed(0)}%'),
+                  Slider(
+                    value: tempVolume,
+                    min: 0.0,
+                    max: 1.0,
+                    divisions: 20, // 0.05 increments
+                    label: (tempVolume * 100).toStringAsFixed(0),
+                    onChanged: (value) {
+                      setDialogState(() {
+                        tempVolume = value;
+                        dialogVolumeController.text = (tempVolume * 100).toStringAsFixed(0);
+                      });
+                    },
+                  ),
+                  SizedBox(
+                    width: 100,
+                    child: TextField(
+                      controller: dialogVolumeController,
+                      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                      decoration: const InputDecoration(
+                        border: OutlineInputBorder(),
+                        contentPadding: EdgeInsets.symmetric(horizontal: 8),
+                        suffixText: '%',
+                      ),
+                      textAlign: TextAlign.center,
+                      onChanged: (value) {
+                        final volumePercent = double.tryParse(value);
+                        if (volumePercent != null) {
+                          setDialogState(() {
+                            tempVolume = (volumePercent / 100).clamp(0.0, 1.0);
+                          });
+                        }
+                      },
+                      onSubmitted: (value) {
+                        final volumePercent = double.tryParse(value);
+                        if (volumePercent != null) {
+                          _setVolume((volumePercent / 100).clamp(0.0, 1.0));
+                        } else {
+                          dialogVolumeController.text = (tempVolume * 100).toStringAsFixed(0);
+                        }
+                      },
+                    ),
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: Text(_tr('cancelButton')),
+                ),
+                ElevatedButton(
+                  onPressed: () {
+                    final volumePercent = double.tryParse(dialogVolumeController.text);
+                    if (volumePercent != null) {
+                      _setVolume((volumePercent / 100).clamp(0.0, 1.0));
+                    } else {
+                      _setVolume(tempVolume);
+                    }
+                    Navigator.of(context).pop();
+                  },
+                  child: Text(_tr('applyButton')),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+
+  void _showTextInputDialog() {
+    final TextEditingController dialogInputController = TextEditingController(text: _mainTextHolderController.text);
+    bool isLoadingFile = false;
+
+    showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (BuildContext context) {
+          return StatefulBuilder(builder: (context, setDialogState) {
+            return AlertDialog(
+              title: Text(_tr('inputDialogTitle')),
               content: SingleChildScrollView(
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
@@ -2400,56 +3091,47 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
                     TextField(
                       controller: dialogInputController,
                       decoration: InputDecoration(
-                        labelText: '在此输入文本 (Enter text here)',
-                        hintText:
-                            '输入或粘贴文本内容... (Type or paste text content...)',
+                        labelText: _tr('inputDialogLabel'),
+                        hintText: _tr('inputDialogHint'),
                         border: const OutlineInputBorder(),
-                        suffixIcon:
-                            dialogInputController.text.isNotEmpty
-                                ? IconButton(
-                                  icon: const Icon(Icons.clear),
-                                  onPressed:
-                                      () => setDialogState(
-                                        () => dialogInputController.clear(),
-                                      ),
-                                )
-                                : null,
+                        suffixIcon: dialogInputController.text.isNotEmpty
+                            ? IconButton(
+                          icon: const Icon(Icons.clear),
+                          onPressed: () => setDialogState(() => dialogInputController.clear()),
+                        )
+                            : null,
                       ),
                       maxLines: 8,
                       minLines: 3,
                     ),
                     const SizedBox(height: 16),
                     ElevatedButton.icon(
-                      icon: const Icon(Icons.file_upload_outlined),
-                      label: const Text('从文件加载 (Load from File)'),
-                      onPressed: () async {
-                        FilePickerResult? result = await FilePicker.platform
-                            .pickFiles(
-                              type: FileType.custom,
-                              allowedExtensions: ['txt'],
-                            );
-                        if (result != null &&
-                            result.files.single.path != null) {
+                      icon: isLoadingFile ? const SizedBox(width: 18, height:18, child: CircularProgressIndicator(strokeWidth: 2,)) : const Icon(Icons.file_upload_outlined),
+                      label: Text(_tr('loadFromFileButton')),
+                      onPressed: isLoadingFile ? null : () async {
+                        setDialogState(() => isLoadingFile = true);
+                        FilePickerResult? result = await FilePicker.platform.pickFiles(
+                          type: FileType.custom,
+                          allowedExtensions: ['txt', 'epub', 'mobi', 'azw3'],
+                        );
+                        if (result != null && result.files.single.path != null) {
                           try {
-                            String content =
-                                await File(
-                                  result.files.first.path!,
-                                ).readAsString();
+                            String content = await compute(_readFileContentInBackground, {
+                              'filePath': result.files.single.path!,
+                              'encodingName': 'UTF-8', // Default to UTF-8 for TXT, EPUB parser handles its own.
+                            });
                             setDialogState(() {
                               dialogInputController.text = content;
                             });
                           } catch (e) {
                             if (mounted) {
                               ScaffoldMessenger.of(context).showSnackBar(
-                                SnackBar(
-                                  content: Text(
-                                    '读取文件失败 (Failed to read file): $e',
-                                  ),
-                                ),
+                                SnackBar(content: Text('读取或解码文件失败 (Failed to read or decode file): $e')),
                               );
                             }
                           }
                         }
+                        setDialogState(() => isLoadingFile = false);
                       },
                     ),
                   ],
@@ -2458,15 +3140,13 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
               actions: [
                 TextButton(
                   onPressed: () => Navigator.of(context).pop(),
-                  child: const Text('取消 (Cancel)'),
+                  child: Text(_tr('cancelButton')),
                 ),
                 ElevatedButton(
                   onPressed: () {
                     final newText = dialogInputController.text;
                     if (_mainTextHolderController.text != newText) {
-                      if (_audioPlayer.playing ||
-                          _isLoading ||
-                          _processedTextChunks.isNotEmpty) {
+                      if (_isCurrentlyPlaying() || _isLoading || _processedTextChunks.isNotEmpty) {
                         _stopPlayback();
                       }
                       _mainTextHolderController.text = newText;
@@ -2485,14 +3165,12 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
                     }
                     Navigator.of(context).pop();
                   },
-                  child: const Text('应用文本 (Apply Text)'),
+                  child: Text(_tr('applyTextButton')),
                 ),
               ],
             );
-          },
-        );
-      },
-    );
+          });
+        });
   }
 
   void _toggleBookmark(int chunkStartIndex, {bool autoAddOnly = false}) {
@@ -2503,8 +3181,7 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
           _bookmarks.sort();
           _saveBookmarks();
         }
-      } else {
-        // Toggle behavior
+      } else { // Toggle behavior
         if (_bookmarks.contains(chunkStartIndex)) {
           _bookmarks.remove(chunkStartIndex);
         } else {
@@ -2518,90 +3195,71 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
 
   void _showBookmarksDialog() {
     showDialog(
-      context: context,
-      builder: (context) {
-        if (_bookmarks.isEmpty) {
-          return AlertDialog(
-            title: const Text('书签 (Bookmarks)'),
-            content: const Text('暂无书签。(No bookmarks yet.)'),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(context).pop(),
-                child: const Text('关闭 (Close)'),
-              ),
-            ],
-          );
-        }
-
-        List<Widget> bookmarkTiles = [];
-        for (int bookmarkedStartIndex in _bookmarks) {
-          int chunkIndex = _processedTextChunks.indexWhere(
-            (chunk) => chunk['startIndex'] == bookmarkedStartIndex,
-          );
-          if (chunkIndex != -1) {
-            final chunkData = _processedTextChunks[chunkIndex];
-            final chunkText = chunkData['text'] as String;
-            bookmarkTiles.add(
-              ListTile(
-                title: Text(_truncateText(chunkText, 50)),
-                leading: Icon(
-                  Icons.bookmark,
-                  color: Theme.of(context).colorScheme.primary,
-                ),
-                trailing: IconButton(
-                  icon: const Icon(Icons.delete_outline, color: Colors.red),
-                  tooltip: '删除书签 (Delete Bookmark)',
-                  onPressed: () {
-                    _toggleBookmark(bookmarkedStartIndex);
-                    Navigator.of(context).pop();
-                    _showBookmarksDialog();
-                  },
-                ),
-                onTap: () {
-                  Navigator.of(context).pop();
-                  _handleChunkTap(chunkIndex, fromBookmark: true);
-                },
-              ),
+        context: context,
+        builder: (context) {
+          if (_bookmarks.isEmpty) {
+            return AlertDialog(
+              title: Text(_tr('bookmarksDialogTitle')),
+              content: Text(_tr('noBookmarks')),
+              actions: [
+                TextButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    child: Text(_tr('closeButton')))
+              ],
             );
           }
-        }
 
-        return AlertDialog(
-          title: const Text('书签 (Bookmarks)'),
-          content: SizedBox(
-            width: double.maxFinite,
-            child: ListView(
-              shrinkWrap: true,
-              children:
-                  bookmarkTiles.isNotEmpty
-                      ? bookmarkTiles
-                      : [
-                        const Center(
-                          child: Text(
-                            "没有找到对应文本的书签。(No bookmarks found for current text.)",
-                          ),
-                        ),
-                      ],
+          List<Widget> bookmarkTiles = [];
+          for (int bookmarkedStartIndex in _bookmarks) {
+            int chunkIndex = _processedTextChunks.indexWhere((chunk) => chunk['startIndex'] == bookmarkedStartIndex);
+            if (chunkIndex != -1) {
+              final chunkData = _processedTextChunks[chunkIndex];
+              final chunkText = chunkData['text'] as String;
+              bookmarkTiles.add(
+                  ListTile(
+                    title: Text(_truncateText(chunkText, 50)),
+                    leading: Icon(Icons.bookmark, color: Theme.of(context).colorScheme.primary),
+                    trailing: IconButton(
+                      icon: const Icon(Icons.delete_outline, color: Colors.red),
+                      tooltip: _tr('deleteBookmarkTooltip'),
+                      onPressed: (){
+                        _toggleBookmark(bookmarkedStartIndex);
+                        Navigator.of(context).pop();
+                        _showBookmarksDialog();
+                      },
+                    ),
+                    onTap: () {
+                      Navigator.of(context).pop();
+                      _handleChunkTap(chunkIndex, fromBookmark: true);
+                    },
+                  )
+              );
+            }
+          }
+
+
+          return AlertDialog(
+            title: Text(_tr('bookmarksDialogTitle')),
+            content: SizedBox(
+              width: double.maxFinite,
+              child: ListView(
+                shrinkWrap: true,
+                children: bookmarkTiles.isNotEmpty ? bookmarkTiles : [Center(child: Text(_tr('noBookmarksForText')))],
+              ),
             ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('关闭 (Close)'),
-            ),
-          ],
-        );
-      },
-    );
+            actions: [
+              TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: Text(_tr('closeButton')))
+            ],
+          );
+        });
   }
 
-  Future<void> _handleChunkTap(
-    int tappedChunkDisplayIndex, {
-    bool fromBookmark = false,
-  }) async {
+  Future<void> _handleChunkTap(int tappedChunkDisplayIndex, {bool fromBookmark = false}) async {
     if (!mounted) return;
 
-    if (_audioPlayer.playing || _isLoading) {
+    if (_isCurrentlyPlaying() || _isLoading) {
       await _stopPlayback();
     }
 
@@ -2609,36 +3267,20 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
     if (_processedTextChunks.isEmpty && currentText.isNotEmpty) {
       setState(() {
         _currentTextForDisplay = currentText;
-        _processedTextChunks = _splitTextIntoDetailedChunks(
-          _currentTextForDisplay,
-          _maxCharsPerRequest,
-        );
-        _chunkKeys = List.generate(
-          _processedTextChunks.length,
-          (_) => GlobalKey(),
-        );
+        _processedTextChunks = _splitTextIntoDetailedChunks(_currentTextForDisplay, _maxCharsPerRequest);
+        _chunkKeys = List.generate(_processedTextChunks.length, (_) => GlobalKey());
         _highlightedCharacterInChunkIndex = -1;
       });
       if (_processedTextChunks.isEmpty) {
-        if (mounted)
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text(
-                '文本为空或处理失败，无法跳转。(Text is empty or processing failed, cannot jump.)',
-              ),
-            ),
-          );
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('文本为空或处理失败，无法跳转。(Text is empty or processing failed, cannot jump.)')));
         return;
       }
     }
 
-    if (tappedChunkDisplayIndex < 0 ||
-        tappedChunkDisplayIndex >= _processedTextChunks.length) {
+    if (tappedChunkDisplayIndex < 0 || tappedChunkDisplayIndex >= _processedTextChunks.length) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('无效的文本片段索引。(Invalid text chunk index.)'),
-          ),
+          const SnackBar(content: Text('无效的文本片段索引。(Invalid text chunk index.)')),
         );
       }
       return;
@@ -2646,6 +3288,7 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
 
     await _initiatePlaybackFromIndex(tappedChunkDisplayIndex);
   }
+
 
   String _truncateText(String text, int maxLength) {
     if (text.length <= maxLength) {
@@ -2657,36 +3300,21 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
   // --- Profile Management Methods ---
   Future<void> _saveCurrentSettingsAsProfile(String profileName) async {
     if (profileName.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('配置文件名不能为空。(Profile name cannot be empty.)'),
-        ),
-      );
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('配置文件名不能为空。(Profile name cannot be empty.)')));
       return;
     }
     if (_savedProfiles.containsKey(profileName)) {
-      bool overwrite =
-          await showDialog<bool>(
-            context: context,
-            builder:
-                (context) => AlertDialog(
-                  title: const Text('确认覆盖 (Confirm Overwrite)'),
-                  content: Text(
-                    '配置文件 "$profileName" 已存在。要覆盖它吗？(Profile "$profileName" already exists. Overwrite it?)',
-                  ),
-                  actions: [
-                    TextButton(
-                      onPressed: () => Navigator.of(context).pop(false),
-                      child: const Text('否 (No)'),
-                    ),
-                    ElevatedButton(
-                      onPressed: () => Navigator.of(context).pop(true),
-                      child: const Text('是 (Yes)'),
-                    ),
-                  ],
-                ),
-          ) ??
-          false;
+      bool overwrite = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: Text(_tr('confirmOverwriteTitle')),
+          content: Text(_tr('confirmOverwriteMessage', params: {'profileName': profileName})),
+          actions: [
+            TextButton(onPressed: () => Navigator.of(context).pop(false), child: Text(_tr('noButton'))),
+            ElevatedButton(onPressed: () => Navigator.of(context).pop(true), child: Text(_tr('yesButton'))),
+          ],
+        ),
+      ) ?? false;
       if (!overwrite) return;
     }
 
@@ -2697,10 +3325,8 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
       'msRegion': _msRegion,
       'msLanguage': _msSelectedLanguage,
       'msVoiceName': _msSelectedVoiceName,
-      'selectedModel': _selectedModel,
-      // OpenAI model
-      'selectedVoice': _selectedVoice,
-      // OpenAI voice
+      'selectedModel': _selectedModel, // OpenAI model
+      'selectedVoice': _selectedVoice, // OpenAI voice
       'useProxy': _useProxy,
       'proxyHost': _proxyHost,
       'proxyPort': _proxyPort,
@@ -2710,20 +3336,14 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
       // 'mainTextContent': _mainTextHolderController.text, // Do not save main text in profile
       'bookmarks': _bookmarks.map((b) => b.toString()).toList(),
       'readingTheme': _currentReadingTheme.toJson(),
-      // 'brightnessOverlayOpacity': _brightnessOverlayOpacity, // Removed
+      'appLocale': _selectedLocale.languageCode,
     };
 
     _savedProfiles[profileName] = jsonEncode(currentProfileData);
     await _prefs.setString(_profilesKey, jsonEncode(_savedProfiles));
 
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            '配置 "$profileName" 已保存。(Profile "$profileName" saved.)',
-          ),
-        ),
-      );
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('配置 "$profileName" 已保存。(Profile "$profileName" saved.)')));
       setState(() {});
     }
   }
@@ -2731,62 +3351,44 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
   Future<void> _applyProfileSettings(Map<String, dynamic> profileData) async {
     await _stopPlayback();
 
-    _selectedTTSProvider =
-        TTSProvider.values[profileData['ttsProvider'] ??
-            TTSProvider.openai.index];
+    _selectedTTSProvider = TTSProvider.values[profileData['ttsProvider'] ?? TTSProvider.openai.index];
     _apiKey = profileData['apiKey'] ?? '';
     _msSubscriptionKey = profileData['msSubscriptionKey'] ?? '';
     _msRegion = profileData['msRegion'] ?? _defaultMsRegionSettings;
     _msSelectedLanguage = profileData['msLanguage'] ?? _defaultMsLanguage;
-    _msSelectedVoiceName =
-        profileData['msVoiceName'] ??
-        (_msHardcodedVoicesByLanguage[_msSelectedLanguage]?.first ?? '');
+    _msSelectedVoiceName = profileData['msVoiceName'] ?? (_msHardcodedVoicesByLanguage[_msSelectedLanguage]?.first ?? '');
 
-    _selectedModel =
-        profileData['selectedModel'] ??
-        _MyHomePageState._defaultOpenAIModelSettings;
-    _selectedVoice =
-        profileData['selectedVoice'] ??
-        _MyHomePageState._defaultOpenAIVoiceSettings;
-    _useProxy =
-        profileData['useProxy'] ?? _MyHomePageState._defaultUseProxySettings;
-    _proxyHost =
-        profileData['proxyHost'] ?? _MyHomePageState._defaultProxyHostSettings;
-    _proxyPort =
-        profileData['proxyPort'] ?? _MyHomePageState._defaultProxyPortSettings;
-    _playbackSpeed =
-        profileData['playbackSpeed'] ??
-        _MyHomePageState._defaultPlaybackSpeedSettings;
-    _maxCharsPerRequest =
-        profileData['maxCharsPerRequest'] ??
-        _MyHomePageState._defaultMaxCharsPerRequestSettings;
-    _prefetchChunkCount =
-        profileData['prefetchChunkCount'] ??
-        _MyHomePageState._defaultPrefetchChunkCountSettings;
+    _selectedModel = profileData['selectedModel'] ?? _MyHomePageState._defaultOpenAIModelSettings;
+    _selectedVoice = profileData['selectedVoice'] ?? _MyHomePageState._defaultOpenAIVoiceSettings;
+    _useProxy = profileData['useProxy'] ?? _MyHomePageState._defaultUseProxySettings;
+    _proxyHost = profileData['proxyHost'] ?? _MyHomePageState._defaultProxyHostSettings;
+    _proxyPort = profileData['proxyPort'] ?? _MyHomePageState._defaultProxyPortSettings;
+    _playbackSpeed = profileData['playbackSpeed'] ?? _MyHomePageState._defaultPlaybackSpeedSettings;
+    _maxCharsPerRequest = profileData['maxCharsPerRequest'] ?? _MyHomePageState._defaultMaxCharsPerRequestSettings;
+    _prefetchChunkCount = profileData['prefetchChunkCount'] ?? _MyHomePageState._defaultPrefetchChunkCountSettings;
     // _mainTextHolderController.text = profileData['mainTextContent'] ?? ''; // Do not load main text from profile
 
     List<dynamic> loadedBookmarksDynamic = profileData['bookmarks'] ?? [];
-    _bookmarks =
-        loadedBookmarksDynamic
-            .map((b) => int.tryParse(b.toString()) ?? -1)
-            .where((i) => i != -1)
-            .toList();
+    _bookmarks = loadedBookmarksDynamic.map((b) => int.tryParse(b.toString()) ?? -1).where((i) => i != -1).toList();
 
     if (profileData['readingTheme'] != null) {
       try {
-        _currentReadingTheme = ReadingTheme.fromJson(
-          profileData['readingTheme'] as Map<String, dynamic>,
-        );
+        _currentReadingTheme = ReadingTheme.fromJson(profileData['readingTheme'] as Map<String, dynamic>);
       } catch (_) {
         _currentReadingTheme = _defaultReadingTheme;
       }
     } else {
       _currentReadingTheme = _defaultReadingTheme;
     }
-    // _brightnessOverlayOpacity = profileData['brightnessOverlayOpacity'] ?? _defaultBrightnessOverlayOpacity; // Removed
+    _selectedLocale = Locale(profileData['appLocale'] ?? 'zh');
+
 
     await _persistCurrentActiveSettings(); // Save loaded profile as current active settings, excluding mainTextContent
-    await _audioPlayer.setSpeed(_playbackSpeed);
+    if (Platform.isWindows) {
+      await _windowsAudioPlayer.setPlaybackRate(_playbackSpeed);
+    } else {
+      await _justAudioPlayer.setSpeed(_playbackSpeed);
+    }
 
     _currentTextForDisplay = "";
     _processedTextChunks = [];
@@ -2796,11 +3398,10 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
 
     if (mounted) {
       setState(() {});
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('配置已加载并应用。(Profile loaded and applied.)')),
-      );
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('配置已加载并应用。(Profile loaded and applied.)')));
     }
   }
+
 
   Future<void> _loadProfile(String profileName) async {
     String? profileJson = _savedProfiles[profileName];
@@ -2810,54 +3411,34 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
         await _applyProfileSettings(profileData);
       } catch (e) {
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(
-                '加载配置 "$profileName" 失败: $e (Failed to load profile "$profileName": $e)',
-              ),
-            ),
-          );
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('加载配置 "$profileName" 失败: $e (Failed to load profile "$profileName": $e)')));
         }
       }
     }
   }
 
   Future<void> _deleteProfile(String profileName) async {
-    bool confirmDelete =
-        await showDialog<bool>(
-          context: context,
-          builder:
-              (context) => AlertDialog(
-                title: const Text('确认删除 (Confirm Delete)'),
-                content: Text(
-                  '确定要删除配置 "$profileName" 吗？此操作无法撤销。(Are you sure you want to delete profile "$profileName"? This action cannot be undone.)',
-                ),
-                actions: [
-                  TextButton(
-                    onPressed: () => Navigator.of(context).pop(false),
-                    child: const Text('取消 (Cancel)'),
-                  ),
-                  TextButton(
-                    onPressed: () => Navigator.of(context).pop(true),
-                    child: const Text('删除 (Delete)'),
-                    style: TextButton.styleFrom(foregroundColor: Colors.red),
-                  ),
-                ],
-              ),
-        ) ??
-        false;
+    bool confirmDelete = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(_tr('confirmDeleteTitle')),
+        content: Text(_tr('confirmDeleteMessage', params: {'profileName': profileName})),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(context).pop(false), child: Text(_tr('cancelButton'))),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: Text(_tr('deleteButton')),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+          ),
+        ],
+      ),
+    ) ?? false;
 
     if (confirmDelete) {
       _savedProfiles.remove(profileName);
       await _prefs.setString(_profilesKey, jsonEncode(_savedProfiles));
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              '配置 "$profileName" 已删除。(Profile "$profileName" deleted.)',
-            ),
-          ),
-        );
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('配置 "$profileName" 已删除。(Profile "$profileName" deleted.)')));
         setState(() {});
       }
     }
@@ -2867,30 +3448,24 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
     final TextEditingController profileNameController = TextEditingController();
     showDialog(
       context: context,
-      builder:
-          (context) => AlertDialog(
-            title: const Text('保存配置 (Save Configuration)'),
-            content: TextField(
-              controller: profileNameController,
-              decoration: const InputDecoration(
-                hintText: '输入配置文件名称 (Enter profile name)',
-              ),
-              autofocus: true,
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(context).pop(),
-                child: const Text('取消 (Cancel)'),
-              ),
-              ElevatedButton(
-                onPressed: () {
-                  _saveCurrentSettingsAsProfile(profileNameController.text);
-                  Navigator.of(context).pop();
-                },
-                child: const Text('保存 (Save)'),
-              ),
-            ],
+      builder: (context) => AlertDialog(
+        title: Text(_tr('saveProfileTitle')),
+        content: TextField(
+          controller: profileNameController,
+          decoration: InputDecoration(hintText: _tr('profileNameHint')),
+          autofocus: true,
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(context).pop(), child: Text(_tr('cancelButton'))),
+          ElevatedButton(
+            onPressed: () {
+              _saveCurrentSettingsAsProfile(profileNameController.text);
+              Navigator.of(context).pop();
+            },
+            child: Text(_tr('saveButton')),
           ),
+        ],
+      ),
     );
   }
 
@@ -2898,249 +3473,164 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
     showDialog(
       context: context,
       builder: (BuildContext context) {
-        return StatefulBuilder(
-          builder: (context, setDialogState) {
-            return AlertDialog(
-              title: const Text('加载/管理配置 (Load/Manage Configurations)'),
-              content: SizedBox(
-                width: double.maxFinite,
-                child:
-                    _savedProfiles.isEmpty
-                        ? const Center(
-                          child: Text('没有已保存的配置。(No saved profiles.)'),
-                        )
-                        : ListView.builder(
-                          shrinkWrap: true,
-                          itemCount: _savedProfiles.length,
-                          itemBuilder: (context, index) {
-                            String profileName = _savedProfiles.keys.elementAt(
-                              index,
+        return StatefulBuilder(builder: (context, setDialogState) {
+          return AlertDialog(
+            title: Text(_tr('loadProfileTitle')),
+            content: SizedBox(
+              width: double.maxFinite,
+              child: _savedProfiles.isEmpty
+                  ? Center(child: Text(_tr('noSavedProfiles')))
+                  : ListView.builder(
+                shrinkWrap: true,
+                itemCount: _savedProfiles.length,
+                itemBuilder: (context, index) {
+                  String profileName = _savedProfiles.keys.elementAt(index);
+                  return ListTile(
+                    title: Text(profileName),
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton( // Export Button
+                          icon: const Icon(Icons.upload_file_outlined, color: Colors.blue),
+                          tooltip: _tr('exportProfileTooltip'),
+                          onPressed: () async {
+                            String? filePath = await FilePicker.platform.saveFile(
+                              dialogTitle: '保存配置文件 (Save Profile As)',
+                              fileName: '$profileName.json',
+                              allowedExtensions: ['json'],
+                              type: FileType.custom,
                             );
-                            return ListTile(
-                              title: Text(profileName),
-                              trailing: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  IconButton(
-                                    // Export Button
-                                    icon: const Icon(
-                                      Icons.upload_file_outlined,
-                                      color: Colors.blue,
-                                    ),
-                                    tooltip: '导出配置 (Export Profile)',
-                                    onPressed: () async {
-                                      String? filePath = await FilePicker
-                                          .platform
-                                          .saveFile(
-                                            dialogTitle:
-                                                '保存配置文件 (Save Profile As)',
-                                            fileName: '$profileName.json',
-                                            allowedExtensions: ['json'],
-                                            type: FileType.custom,
-                                          );
-                                      if (filePath != null) {
-                                        try {
-                                          final file = File(filePath);
-                                          await file.writeAsString(
-                                            _savedProfiles[profileName]!,
-                                          );
-                                          if (mounted)
-                                            ScaffoldMessenger.of(
-                                              context,
-                                            ).showSnackBar(
-                                              SnackBar(
-                                                content: Text(
-                                                  '配置已导出到: $filePath (Profile exported to: $filePath)',
-                                                ),
-                                              ),
-                                            );
-                                        } catch (e) {
-                                          if (mounted)
-                                            ScaffoldMessenger.of(
-                                              context,
-                                            ).showSnackBar(
-                                              SnackBar(
-                                                content: Text(
-                                                  '导出失败 (Export failed): $e',
-                                                ),
-                                              ),
-                                            );
-                                        }
-                                      }
-                                    },
-                                  ),
-                                  IconButton(
-                                    icon: const Icon(
-                                      Icons.file_download_outlined,
-                                      color: Colors.green,
-                                    ),
-                                    tooltip: '加载 (Load)',
-                                    onPressed: () async {
-                                      await _loadProfile(profileName);
-                                      Navigator.of(context).pop();
-                                    },
-                                  ),
-                                  IconButton(
-                                    icon: const Icon(
-                                      Icons.delete_outline,
-                                      color: Colors.red,
-                                    ),
-                                    tooltip: '删除 (Delete)',
-                                    onPressed: () async {
-                                      await _deleteProfile(profileName);
-                                      setDialogState(() {});
-                                    },
-                                  ),
-                                ],
-                              ),
-                            );
+                            if (filePath != null) {
+                              try {
+                                final file = File(filePath);
+                                await file.writeAsString(_savedProfiles[profileName]!);
+                                if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('配置已导出到: $filePath (Profile exported to: $filePath)')));
+                              } catch (e) {
+                                if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('导出失败 (Export failed): $e')));
+                              }
+                            }
                           },
                         ),
+                        IconButton(
+                          icon: const Icon(Icons.file_download_outlined, color: Colors.green),
+                          tooltip: _tr('loadProfileTooltip'),
+                          onPressed: () async {
+                            await _loadProfile(profileName);
+                            Navigator.of(context).pop();
+                          },
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.delete_outline, color: Colors.red),
+                          tooltip: _tr('deleteProfileTooltip'),
+                          onPressed: () async {
+                            await _deleteProfile(profileName);
+                            setDialogState(() {});
+                          },
+                        ),
+                      ],
+                    ),
+                  );
+                },
               ),
-              actions: <Widget>[
-                ElevatedButton.icon(
-                  // Import Button
-                  icon: const Icon(Icons.download_outlined),
-                  label: const Text('导入配置文件 (Import Profile)'),
-                  onPressed: () async {
-                    FilePickerResult? result = await FilePicker.platform
-                        .pickFiles(
-                          type: FileType.custom,
-                          allowedExtensions: ['json'],
-                        );
-                    if (result != null && result.files.single.path != null) {
-                      try {
-                        final file = File(result.files.single.path!);
-                        String fileContent = await file.readAsString();
-                        // Map<String, dynamic> importedProfileData = jsonDecode(fileContent); // No need to decode here, just store string
+            ),
+            actions: <Widget>[
+              ElevatedButton.icon( // Import Button
+                icon: const Icon(Icons.download_outlined),
+                label: Text(_tr('importProfileButton')),
+                onPressed: () async {
+                  FilePickerResult? result = await FilePicker.platform.pickFiles(
+                    type: FileType.custom,
+                    allowedExtensions: ['json'],
+                  );
+                  if (result != null && result.files.single.path != null) {
+                    try {
+                      final file = File(result.files.single.path!);
+                      String fileContent = await file.readAsString();
 
-                        final TextEditingController importNameController =
-                            TextEditingController(
-                              text: result.files.single.name.replaceAll(
-                                '.json',
-                                '',
-                              ),
-                            );
-                        bool? confirmImport = await showDialog<bool>(
-                          context: context,
-                          builder:
-                              (nameDialogContext) => AlertDialog(
-                                title: const Text('导入配置 (Import Profile)'),
-                                content: TextField(
-                                  controller: importNameController,
-                                  decoration: const InputDecoration(
-                                    labelText: '为此配置命名 (Name this profile)',
-                                  ),
-                                ),
-                                actions: [
-                                  TextButton(
-                                    onPressed:
-                                        () => Navigator.of(
-                                          nameDialogContext,
-                                        ).pop(false),
-                                    child: const Text('取消 (Cancel)'),
-                                  ),
-                                  ElevatedButton(
-                                    onPressed:
-                                        () => Navigator.of(
-                                          nameDialogContext,
-                                        ).pop(true),
-                                    child: const Text('导入 (Import)'),
-                                  ),
-                                ],
-                              ),
-                        );
+                      final TextEditingController importNameController = TextEditingController(text: result.files.single.name.replaceAll('.json', ''));
+                      bool? confirmImport = await showDialog<bool>(
+                        context: context,
+                        builder: (nameDialogContext) => AlertDialog(
+                          title: Text(_tr('importProfileButton')),
+                          content: TextField(
+                            controller: importNameController,
+                            decoration: InputDecoration(labelText: _tr('nameThisProfileLabel')),
+                          ),
+                          actions: [
+                            TextButton(onPressed: () => Navigator.of(nameDialogContext).pop(false), child: Text(_tr('cancelButton'))),
+                            ElevatedButton(onPressed: () => Navigator.of(nameDialogContext).pop(true), child: Text(_tr('importButton'))),
+                          ],
+                        ),
+                      );
 
-                        if (confirmImport == true &&
-                            importNameController.text.isNotEmpty) {
-                          _savedProfiles[importNameController.text] =
-                              fileContent;
-                          await _prefs.setString(
-                            _profilesKey,
-                            jsonEncode(_savedProfiles),
-                          );
-                          if (mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(
-                                content: Text(
-                                  '配置 "${importNameController.text}" 已导入。(Profile "${importNameController.text}" imported.)',
-                                ),
-                              ),
-                            );
-                          }
-                          setDialogState(() {});
+                      if (confirmImport == true && importNameController.text.isNotEmpty) {
+                        _savedProfiles[importNameController.text] = fileContent;
+                        await _prefs.setString(_profilesKey, jsonEncode(_savedProfiles));
+                        if (mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('配置 "${importNameController.text}" 已导入。(Profile "${importNameController.text}" imported.)')));
                         }
-                      } catch (e) {
-                        if (mounted)
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(content: Text('导入失败 (Import failed): $e')),
-                          );
+                        setDialogState((){});
                       }
+                    } catch (e) {
+                      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('导入失败 (Import failed): $e')));
                     }
-                  },
-                ),
-                TextButton(
-                  child: const Text('关闭 (Close)'),
-                  onPressed: () {
-                    Navigator.of(context).pop();
-                  },
-                ),
-              ],
-            );
-          },
-        );
+                  }
+                },
+              ),
+              TextButton(
+                child: Text(_tr('closeButton')),
+                onPressed: () {
+                  Navigator.of(context).pop();
+                },
+              ),
+            ],
+          );
+        });
       },
     );
   }
 
   void _showErrorLogsDialog() {
     showDialog(
-      context: context,
-      builder: (context) {
-        return StatefulBuilder(
-          builder: (BuildContext context, StateSetter setDialogState) {
-            return AlertDialog(
-              title: const Text('错误日志 (Error Logs)'),
-              content: SizedBox(
-                width: double.maxFinite,
-                child:
-                    _errorLogs.isEmpty
-                        ? const Center(child: Text('暂无日志。(No logs yet.)'))
-                        : ListView.builder(
-                          shrinkWrap: true,
-                          itemCount: _errorLogs.length,
-                          itemBuilder: (context, index) {
-                            return Padding(
-                              padding: const EdgeInsets.symmetric(
-                                vertical: 4.0,
-                              ),
-                              child: Text(
-                                _errorLogs[index],
-                                style: const TextStyle(fontSize: 12),
-                              ),
-                            );
-                          },
-                        ),
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () async {
-                    await _clearErrorLogs();
-                    setDialogState(() {});
-                  },
-                  child: const Text('清除日志 (Clear Logs)'),
+        context: context,
+        builder: (context) {
+          return StatefulBuilder(
+            builder: (BuildContext context, StateSetter setDialogState) {
+              return AlertDialog(
+                title: Text(_tr('errorLogsTitle')),
+                content: SizedBox(
+                  width: double.maxFinite,
+                  child: _errorLogs.isEmpty
+                      ? Center(child: Text(_tr('noLogs')))
+                      : ListView.builder(
+                    shrinkWrap: true,
+                    itemCount: _errorLogs.length,
+                    itemBuilder: (context, index) {
+                      return Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 4.0),
+                        child: Text(_errorLogs[index], style: const TextStyle(fontSize: 12)),
+                      );
+                    },
+                  ),
                 ),
-                TextButton(
-                  onPressed: () => Navigator.of(context).pop(),
-                  child: const Text('关闭 (Close)'),
-                ),
-              ],
-            );
-          },
-        );
-      },
-    );
+                actions: [
+                  TextButton(
+                    onPressed: () async {
+                      await _clearErrorLogs();
+                      setDialogState(() {});
+                    },
+                    child: Text(_tr('clearLogsButton')),
+                  ),
+                  TextButton(
+                      onPressed: () => Navigator.of(context).pop(),
+                      child: Text(_tr('closeButton')))
+                ],
+              );
+            },
+          );
+        });
   }
+
 
   @override
   Widget build(BuildContext context) {
@@ -3155,9 +3645,7 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
               padding: const EdgeInsets.all(8.0),
               decoration: BoxDecoration(
                 color: _currentReadingTheme.backgroundColor,
-                border: Border.all(
-                  color: theme.colorScheme.outlineVariant.withOpacity(0.5),
-                ),
+                border: Border.all(color: theme.colorScheme.outlineVariant.withOpacity(0.5)),
                 borderRadius: BorderRadius.circular(12.0),
                 boxShadow: [
                   BoxShadow(
@@ -3167,130 +3655,93 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
                   ),
                 ],
               ),
-              child:
-                  _processedTextChunks.isEmpty && !_isLoading
-                      ? Center(
-                        child: Text(
-                          _mainTextHolderController.text.isEmpty
-                              ? '请通过右下角按钮输入或加载文本。\n(Please input or load text via the bottom-right button.)'
-                              : '待朗读的文本将显示在此处。\n(Text to be read will appear here.)',
-                          textAlign: TextAlign.center,
-                          style: TextStyle(
-                            color: _currentReadingTheme.textColor.withOpacity(
-                              0.7,
-                            ),
-                            fontSize: 16,
-                          ),
+              child: _processedTextChunks.isEmpty && !_isLoading
+                  ? Center(
+                child: Text(
+                  _mainTextHolderController.text.isEmpty
+                      ? '请通过右下角按钮输入或加载文本。\n(Please input or load text via the bottom-right button.)'
+                      : '待朗读的文本将显示在此处。\n(Text to be read will appear here.)',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: _currentReadingTheme.textColor.withOpacity(0.7), fontSize: 16),
+                ),
+              )
+                  : ListView.builder(
+                controller: _displayAreaScrollController,
+                itemCount: _processedTextChunks.length,
+                itemBuilder: (context, index) {
+                  final chunkData = _processedTextChunks[index];
+                  final chunkText = chunkData['text'] as String;
+                  final chunkStartIndex = chunkData['startIndex'] as int;
+                  final bool isThisChunkCurrentlyPlaying = index == _currentlyPlayingChunkIndex;
+                  final bool isBookmarked = _bookmarks.contains(chunkStartIndex);
+
+                  if (index >= _chunkKeys.length) {
+                    return Text(chunkText, style: TextStyle(color: _currentReadingTheme.textColor)); // Fallback
+                  }
+
+                  List<TextSpan> spans = [];
+                  if (isThisChunkCurrentlyPlaying) {
+                    for (int i = 0; i < chunkText.length; i++) {
+                      spans.add(TextSpan(
+                        text: chunkText[i],
+                        style: TextStyle(
+                          fontSize: 17,
+                          color: i <= _highlightedCharacterInChunkIndex
+                              ? _currentReadingTheme.karaokeTextColor
+                              : _currentReadingTheme.playingChunkTextColor,
+                          fontWeight: FontWeight.bold,
+                          backgroundColor: i <= _highlightedCharacterInChunkIndex
+                              ? _currentReadingTheme.karaokeFillColor
+                              : Colors.transparent,
                         ),
-                      )
-                      : ListView.builder(
-                        controller: _displayAreaScrollController,
-                        itemCount: _processedTextChunks.length,
-                        itemBuilder: (context, index) {
-                          final chunkData = _processedTextChunks[index];
-                          final chunkText = chunkData['text'] as String;
-                          final chunkStartIndex =
-                              chunkData['startIndex'] as int;
-                          final bool isThisChunkCurrentlyPlaying =
-                              index == _currentlyPlayingChunkIndex;
-                          final bool isBookmarked = _bookmarks.contains(
-                            chunkStartIndex,
-                          );
+                      ));
+                    }
+                  } else {
+                    spans.add(TextSpan(
+                      text: chunkText,
+                      style: TextStyle(
+                          fontSize: 16,
+                          color: _currentReadingTheme.textColor),
+                    ));
+                  }
 
-                          if (index >= _chunkKeys.length) {
-                            return Text(
-                              chunkText,
-                              style: TextStyle(
-                                color: _currentReadingTheme.textColor,
-                              ),
-                            ); // Fallback
-                          }
-
-                          List<TextSpan> spans = [];
-                          if (isThisChunkCurrentlyPlaying) {
-                            for (int i = 0; i < chunkText.length; i++) {
-                              spans.add(
-                                TextSpan(
-                                  text: chunkText[i],
-                                  style: TextStyle(
-                                    fontSize: 17,
-                                    color:
-                                        i <= _highlightedCharacterInChunkIndex
-                                            ? _currentReadingTheme
-                                                .karaokeTextColor
-                                            : _currentReadingTheme
-                                                .playingChunkTextColor,
-                                    fontWeight: FontWeight.bold,
-                                    backgroundColor:
-                                        i <= _highlightedCharacterInChunkIndex
-                                            ? _currentReadingTheme
-                                                .karaokeFillColor
-                                            : Colors.transparent,
-                                  ),
-                                ),
-                              );
-                            }
-                          } else {
-                            spans.add(
-                              TextSpan(
-                                text: chunkText,
-                                style: TextStyle(
-                                  fontSize: 16,
-                                  color: _currentReadingTheme.textColor,
-                                ),
-                              ),
-                            );
-                          }
-
-                          return GestureDetector(
-                            onTap: () => _handleChunkTap(index),
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                vertical: 6.0,
-                              ),
-                              child: Row(
-                                key: _chunkKeys[index],
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Expanded(
-                                    child: RichText(
-                                      text: TextSpan(
-                                        style: TextStyle(
-                                          fontSize: 16,
-                                          color: _currentReadingTheme.textColor,
-                                        ),
-                                        children: spans,
-                                      ),
-                                    ),
-                                  ),
-                                  Material(
-                                    color: Colors.transparent,
-                                    child: InkWell(
-                                      onTap:
-                                          () =>
-                                              _toggleBookmark(chunkStartIndex),
-                                      borderRadius: BorderRadius.circular(24),
-                                      child: Padding(
-                                        padding: const EdgeInsets.all(8.0),
-                                        child: Icon(
-                                          isBookmarked
-                                              ? Icons.star
-                                              : Icons.star_border,
-                                          color:
-                                              isBookmarked
-                                                  ? Colors.amber[600]
-                                                  : Colors.grey,
-                                          size: 20,
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                ],
+                  return GestureDetector(
+                    onTap: () => _handleChunkTap(index),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(vertical: 6.0),
+                      child: Row(
+                        key: _chunkKeys[index],
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Expanded(
+                            child: RichText(
+                              text: TextSpan(
+                                style: TextStyle(fontSize: 16, color: _currentReadingTheme.textColor),
+                                children: spans,
                               ),
                             ),
-                          );
-                        },
+                          ),
+                          Material(
+                            color: Colors.transparent,
+                            child: InkWell(
+                              onTap: () => _toggleBookmark(chunkStartIndex),
+                              borderRadius: BorderRadius.circular(24),
+                              child: Padding(
+                                padding: const EdgeInsets.all(8.0),
+                                child: Icon(
+                                  isBookmarked ? Icons.star : Icons.star_border,
+                                  color: isBookmarked ? Colors.amber[600] : Colors.grey,
+                                  size: 20,
+                                ),
+                              ),
+                            ),
+                          )
+                        ],
                       ),
+                    ),
+                  );
+                },
+              ),
             ),
           ),
           const SizedBox(height: 12),
@@ -3300,278 +3751,211 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
     );
 
     return Scaffold(
-      backgroundColor: _currentReadingTheme.backgroundColor,
-      body: SafeArea(
-        child:
-            _currentReadingTheme.applyBlur
-                ? BackdropFilter(
-                  filter: ImageFilter.blur(sigmaX: 5.0, sigmaY: 5.0),
-                  child: Container(
-                    color: Colors.transparent,
-                    child: mainContent,
-                  ),
-                )
-                : mainContent,
-      ),
-      floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
-      floatingActionButton: _buildFloatingActionButtons(theme),
+    backgroundColor: _currentReadingTheme.backgroundColor,
+    body: SafeArea(
+    child: _currentReadingTheme.applyBlur
+    ? BackdropFilter(
+    filter: ImageFilter.blur(sigmaX: 5.0, sigmaY: 5.0),
+    child: Container(
+    color: Colors.transparent,
+    child: mainContent,
+    ),
+    )
+        : mainContent,
+    ),
+    floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
+    floatingActionButton: _buildFloatingActionButtons(theme),
     );
   }
 
   Widget _buildBottomStatusArea(ThemeData theme) {
+    bool isPlayerActive = (Platform.isWindows && _windowsAudioPlayer.state != ap.PlayerState.stopped) ||
+        (!Platform.isWindows && _justAudioPlayer.playing && _justAudioPlayer.processingState != ja.ProcessingState.idle);
+    bool showProgress = _processedTextChunks.isNotEmpty &&
+        (isPlayerActive || _isLoading) &&
+        _currentlyPlayingChunkIndex >= 0;
+
+
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        if (_processedTextChunks.isNotEmpty &&
-            (_audioPlayer.playing ||
-                _audioPlayer.processingState == ja.ProcessingState.ready ||
-                _audioPlayer.processingState == ja.ProcessingState.buffering ||
-                _isLoading) &&
-            _currentlyPlayingChunkIndex >= 0)
+        if (showProgress)
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 4.0),
             child: Row(
               children: [
                 Expanded(
-                  flex: 3,
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       LinearProgressIndicator(
-                        value:
-                            (_currentlyPlayingChunkIndex + 1) /
-                            _processedTextChunks.length,
-                        backgroundColor: _currentReadingTheme.textColor
-                            .withOpacity(0.2),
-                        valueColor: AlwaysStoppedAnimation<Color>(
-                          _currentReadingTheme.playingChunkTextColor,
-                        ),
+                        value: (_currentlyPlayingChunkIndex + 1) / _processedTextChunks.length,
+                        backgroundColor: _currentReadingTheme.textColor.withOpacity(0.2),
+                        valueColor: AlwaysStoppedAnimation<Color>(_currentReadingTheme.playingChunkTextColor),
                         minHeight: 6,
                       ),
                       const SizedBox(height: 2),
-                      Text(
-                        '片段: ${_currentlyPlayingChunkIndex + 1}/${_processedTextChunks.length} (${((_currentlyPlayingChunkIndex + 1) / _processedTextChunks.length * 100).toStringAsFixed(0)}%)',
-                        style: TextStyle(
-                          fontSize: 10,
-                          color: _currentReadingTheme.textColor.withOpacity(
-                            0.7,
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(
+                            '${_tr('chunkLabel')}: ${_currentlyPlayingChunkIndex + 1}/${_processedTextChunks.length} (${((_currentlyPlayingChunkIndex + 1) / _processedTextChunks.length * 100).toStringAsFixed(0)}%)',
+                            style: TextStyle(fontSize: 10, color: _currentReadingTheme.textColor.withOpacity(0.7)),
                           ),
-                        ),
+                          Column(
+                            crossAxisAlignment: CrossAxisAlignment.end,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                '${_tr('speedLabel')}: ${_playbackSpeed.toStringAsFixed(2)}x',
+                                style: TextStyle(fontSize: 10, color: _currentReadingTheme.textColor.withOpacity(0.7)),
+                              ),
+                              if (_isBufferingInBackground && !_isLoading)
+                                Text(
+                                  _backgroundBufferingPreviewText != null
+                                      ? '${_tr('bufferingLabel')}:“${_truncateText(_backgroundBufferingPreviewText!, 10)}”'
+                                      : '${_tr('bufferingLabel')}...',
+                                  style: TextStyle(fontSize: 10, color: _currentReadingTheme.textColor.withOpacity(0.7)),
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                            ],
+                          ),
+                        ],
                       ),
-                    ],
-                  ),
-                ),
-                const SizedBox(width: 16),
-                Expanded(
-                  flex: 2,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.end,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        '倍速: ${_playbackSpeed.toStringAsFixed(2)}x',
-                        style: TextStyle(
-                          fontSize: 10,
-                          color: _currentReadingTheme.textColor.withOpacity(
-                            0.7,
-                          ),
-                        ),
-                      ),
-                      if (_isBufferingInBackground && !_isLoading)
-                        Text(
-                          _backgroundBufferingPreviewText != null
-                              ? '缓冲:“${_truncateText(_backgroundBufferingPreviewText!, 10)}”'
-                              : '缓冲中...',
-                          style: TextStyle(
-                            fontSize: 10,
-                            color: _currentReadingTheme.textColor.withOpacity(
-                              0.7,
-                            ),
-                          ),
-                          overflow: TextOverflow.ellipsis,
-                        ),
                     ],
                   ),
                 ),
               ],
             ),
           ),
-        // Centered Loading status text (only when _isLoading is true for initial load/jump)
-        if (_isLoading &&
-            (_currentlyFetchingChunkText != null || !_isBufferingInBackground))
+        if (_isLoading && (_currentlyFetchingChunkText != null || !_isBufferingInBackground))
           Padding(
-            padding: const EdgeInsets.only(top: 4.0, bottom: 8.0),
+            padding: const EdgeInsets.only(top: 4.0, bottom: 0),
             child: Center(
               child: Text(
-                _currentlyFetchingChunkText != null &&
-                        _currentlyFetchingChunkText!.isNotEmpty
-                    ? '正在加载：“${_truncateText(_currentlyFetchingChunkText!, 25)}”...'
-                    : '正在加载...',
+                _currentlyFetchingChunkText != null && _currentlyFetchingChunkText!.isNotEmpty
+                    ? '${_tr('loadingLabel')}：“${_truncateText(_currentlyFetchingChunkText!, 25)}”...'
+                    : '${_tr('loadingLabel')}...',
                 textAlign: TextAlign.center,
-                style: TextStyle(
-                  fontSize: 11,
-                  color: _currentReadingTheme.textColor.withOpacity(0.8),
-                ),
+                style: TextStyle(fontSize: 11, color: _currentReadingTheme.textColor.withOpacity(0.8)),
               ),
             ),
-          ),
+          )
+        else if (_isLoading)
+          Padding(
+            padding: const EdgeInsets.only(top: 4.0, bottom: 0),
+            child: Center(
+              child: Text(
+                '${_tr('loadingLabel')}...',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 11, color: _currentReadingTheme.textColor.withOpacity(0.8)),
+              ),
+            ),
+          )
       ],
     );
   }
 
+
   Widget _buildFloatingActionButtons(ThemeData theme) {
+    // Since animations are removed, we directly build the buttons.
+    List<Widget> leftFabs = [];
+    List<Widget> rightFabs = [];
+
+    // Player Controls (Left)
+    if (Platform.isWindows) {
+      final windowsPlayerState = _windowsAudioPlayer.state; // Get current state directly
+      final isWindowsPlaying = windowsPlayerState == ap.PlayerState.playing;
+
+      if (_isLoading && _currentlyFetchingChunkText == null && !_isBufferingInBackground) {
+        leftFabs.add(FloatingActionButton.small(
+          onPressed: _stopPlayback,
+          tooltip: _tr('cancelLoadingButton'),
+          heroTag: 'cancelLoadFabLeftWin',
+          backgroundColor: Colors.grey[400],
+          child: const Icon(Icons.cancel_outlined),
+        ));
+      } else if (isWindowsPlaying) {
+        leftFabs.addAll([
+          FloatingActionButton.small(onPressed: () => _windowsAudioPlayer.pause(), tooltip: _tr('pauseButton'), heroTag: 'pauseFabLeftWin', child: const Icon(Icons.pause_circle_filled_outlined)),
+          const SizedBox(height: 8),
+          FloatingActionButton.small(onPressed: _stopPlayback, tooltip: _tr('stopButton'), heroTag: 'stopFabLeftWin', backgroundColor: Colors.red.shade300, child: const Icon(Icons.stop_circle_outlined, color: Colors.white)),
+        ]);
+      } else if (windowsPlayerState == ap.PlayerState.paused && _processedTextChunks.isNotEmpty) {
+        leftFabs.addAll([
+          FloatingActionButton.small(onPressed: () => _windowsAudioPlayer.resume(), tooltip: _tr('resumeButton'), heroTag: 'resumeFabLeftWin', backgroundColor: Colors.green.shade300, child: const Icon(Icons.play_circle_filled_outlined, color: Colors.white)),
+          const SizedBox(height: 8),
+          FloatingActionButton.small(onPressed: _stopPlayback, tooltip: _tr('stopButton'), heroTag: 'stopFabLeftPausedWin', backgroundColor: Colors.red.shade300, child: const Icon(Icons.stop_circle_outlined, color: Colors.white)),
+        ]);
+      } else {
+        leftFabs.add(FloatingActionButton(onPressed: (_mainTextHolderController.text.isNotEmpty && !_isLoading) ? _speakText : null, tooltip: _tr('readAloudButton'), heroTag: 'readAloudFabLeftWin', backgroundColor: theme.colorScheme.primary, child: Icon(Icons.volume_up_outlined, color: theme.colorScheme.onPrimary)));
+      }
+    } else { // Non-Windows (just_audio)
+      final isJustAudioPlaying = _justAudioPlayer.playing;
+      final justAudioProcessingState = _justAudioPlayer.processingState;
+
+      if (_isLoading && _currentlyFetchingChunkText == null && !_isBufferingInBackground) {
+        leftFabs.add(FloatingActionButton.small(onPressed: _stopPlayback, tooltip: _tr('cancelLoadingButton'), heroTag: 'cancelLoadFabLeft', backgroundColor: Colors.grey[400], child: const Icon(Icons.cancel_outlined)));
+      } else if (isJustAudioPlaying) {
+        leftFabs.addAll([
+          FloatingActionButton.small(onPressed: () => _justAudioPlayer.pause(), tooltip: _tr('pauseButton'), heroTag: 'pauseFabLeft', child: const Icon(Icons.pause_circle_filled_outlined)),
+          const SizedBox(height: 8),
+          FloatingActionButton.small(onPressed: _stopPlayback, tooltip: _tr('stopButton'), heroTag: 'stopFabLeft', backgroundColor: Colors.red.shade300, child: const Icon(Icons.stop_circle_outlined, color: Colors.white)),
+        ]);
+      } else if (!isJustAudioPlaying && (justAudioProcessingState == ja.ProcessingState.buffering || justAudioProcessingState == ja.ProcessingState.ready) && _playlist != null && _playlist!.length > 0 && _justAudioPlayer.audioSource != null) {
+        leftFabs.addAll([
+          FloatingActionButton.small(onPressed: () => _justAudioPlayer.play(), tooltip: _tr('resumeButton'), heroTag: 'resumeFabLeft', backgroundColor: Colors.green.shade300, child: const Icon(Icons.play_circle_filled_outlined, color: Colors.white)),
+          const SizedBox(height: 8),
+          FloatingActionButton.small(onPressed: _stopPlayback, tooltip: _tr('stopButton'), heroTag: 'stopFabLeftPaused', backgroundColor: Colors.red.shade300, child: const Icon(Icons.stop_circle_outlined, color: Colors.white)),
+        ]);
+      } else {
+        leftFabs.add(FloatingActionButton(onPressed: (_mainTextHolderController.text.isNotEmpty && !_isLoading) ? _speakText : null, tooltip: _tr('readAloudButton'), heroTag: 'readAloudFabLeft', backgroundColor: theme.colorScheme.primary, child: Icon(Icons.volume_up_outlined, color: theme.colorScheme.onPrimary)));
+      }
+    }
+
+    // Utility Buttons (Right)
+    rightFabs.addAll([
+      FloatingActionButton(onPressed: _showTextInputDialog, tooltip: _tr('inputTextButton'), heroTag: 'inputTextFabRight', mini: true, child: const Icon(Icons.edit_note_outlined)),
+      const SizedBox(height: 10),
+      FloatingActionButton(onPressed: _showBookmarksDialog, tooltip: _tr('bookmarksButton'), heroTag: 'bookmarksFabRight', mini: true, child: const Icon(Icons.bookmark_outline)),
+      const SizedBox(height: 10),
+      FloatingActionButton(onPressed: _showPlaybackSpeedDialog, tooltip: _tr('playbackSpeedButton'), heroTag: 'speedFabRight', mini: true, child: const Icon(Icons.speed_outlined)),
+      const SizedBox(height: 10),
+      FloatingActionButton(onPressed: _showVolumeDialog, tooltip: _tr('volumeButton'), heroTag: 'volumeFabRight', mini: true, child: const Icon(Icons.volume_down_outlined)), // New Volume Button
+      const SizedBox(height: 10),
+      FloatingActionButton(onPressed: _showSettingsDialog, tooltip: _tr('settingsButton'), heroTag: 'settingsFabRight', mini: true, child: const Icon(Icons.settings_outlined)),
+    ]);
+
     return Stack(
       children: [
         Positioned(
           left: 32.0,
-          bottom: 48.0, // Increased bottom padding for player controls
-          child: StreamBuilder<ja.PlayerState>(
-            stream: _audioPlayer.playerStateStream,
-            builder: (context, snapshot) {
-              final playerState = snapshot.data;
-              final isPlaying = playerState?.playing ?? false;
-              final processingState =
-                  playerState?.processingState ?? ja.ProcessingState.idle;
-
-              if (_isLoading &&
-                  _currentlyFetchingChunkText == null &&
-                  !_isBufferingInBackground) {
-                return FloatingActionButton.small(
-                  onPressed: _stopPlayback,
-                  tooltip: '取消加载 (Cancel Loading)',
-                  heroTag: 'cancelLoadFabLeft',
-                  backgroundColor: Colors.grey[400],
-                  child: const Icon(Icons.cancel_outlined),
-                );
-              }
-
-              List<Widget> playerControlButtons = [];
-
-              if (isPlaying) {
-                playerControlButtons.addAll([
-                  FloatingActionButton.small(
-                    onPressed: () => _audioPlayer.pause(),
-                    tooltip: '暂停 (Pause)',
-                    heroTag: 'pauseFabLeft',
-                    child: const Icon(Icons.pause_circle_filled_outlined),
-                  ),
-                  const SizedBox(height: 8),
-                  FloatingActionButton.small(
-                    onPressed: _stopPlayback,
-                    tooltip: '停止 (Stop)',
-                    heroTag: 'stopFabLeft',
-                    backgroundColor: Colors.red.shade300,
-                    child: const Icon(
-                      Icons.stop_circle_outlined,
-                      color: Colors.white,
-                    ),
-                  ),
-                ]);
-              } else if (!isPlaying &&
-                  (processingState == ja.ProcessingState.buffering ||
-                      processingState == ja.ProcessingState.ready) &&
-                  _playlist != null &&
-                  _playlist!.length > 0 &&
-                  _audioPlayer.audioSource != null) {
-                playerControlButtons.addAll([
-                  FloatingActionButton.small(
-                    onPressed: () => _audioPlayer.play(),
-                    tooltip: '继续 (Resume)',
-                    heroTag: 'resumeFabLeft',
-                    backgroundColor: Colors.green.shade300,
-                    child: const Icon(
-                      Icons.play_circle_filled_outlined,
-                      color: Colors.white,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  FloatingActionButton.small(
-                    onPressed: _stopPlayback,
-                    tooltip: '停止 (Stop)',
-                    heroTag: 'stopFabLeftPaused',
-                    backgroundColor: Colors.red.shade300,
-                    child: const Icon(
-                      Icons.stop_circle_outlined,
-                      color: Colors.white,
-                    ),
-                  ),
-                ]);
-              } else {
-                playerControlButtons.add(
-                  FloatingActionButton(
-                    onPressed:
-                        (_mainTextHolderController.text.isNotEmpty &&
-                                !_isLoading)
-                            ? _speakText
-                            : null,
-                    tooltip: '朗读文本 (Read Aloud)',
-                    heroTag: 'readAloudFabLeft',
-                    backgroundColor: theme.colorScheme.primary,
-                    child: Icon(
-                      Icons.volume_up_outlined,
-                      color: theme.colorScheme.onPrimary,
-                    ),
-                  ),
-                );
-              }
-              return Column(
-                mainAxisAlignment: MainAxisAlignment.end,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: playerControlButtons,
-              );
-            },
+          bottom: 48.0,
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.end,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: leftFabs,
           ),
         ),
         Positioned(
           right: 0.0,
-          bottom: 48.0, // Adjusted bottom padding for utility buttons
+          bottom: 48.0,
           child: Column(
             mainAxisAlignment: MainAxisAlignment.end,
             crossAxisAlignment: CrossAxisAlignment.end,
-            children: [
-              FloatingActionButton(
-                onPressed: _showTextInputDialog,
-                tooltip: '输入或加载文本 (Input or Load Text)',
-                heroTag: 'inputTextFabRight',
-                mini: true,
-                child: const Icon(Icons.edit_note_outlined),
-              ),
-              const SizedBox(height: 10),
-              FloatingActionButton(
-                onPressed: _showBookmarksDialog,
-                tooltip: '书签 (Bookmarks)',
-                heroTag: 'bookmarksFabRight',
-                mini: true,
-                child: const Icon(Icons.bookmark_outline),
-              ),
-              const SizedBox(height: 10),
-              FloatingActionButton(
-                onPressed: _showPlaybackSpeedDialog,
-                tooltip: '播放倍速 (Playback Speed)',
-                heroTag: 'speedFabRight',
-                mini: true,
-                child: const Icon(Icons.speed_outlined),
-              ),
-              const SizedBox(height: 10),
-              FloatingActionButton(
-                onPressed: _showSettingsDialog,
-                tooltip: '设置 (Settings)',
-                heroTag: 'settingsFabRight',
-                mini: true,
-                child: const Icon(Icons.settings_outlined),
-              ),
-            ],
+            children: rightFabs,
           ),
         ),
       ],
     );
   }
+
 
   Widget _buildSectionTitle(String title) {
     return Padding(
       padding: const EdgeInsets.only(top: 0, bottom: 12.0),
       child: Text(
-        title,
+        _tr(title),
         style: Theme.of(context).textTheme.titleMedium?.copyWith(
           fontWeight: FontWeight.bold,
           color: _currentReadingTheme.textColor.withOpacity(0.85),
@@ -3580,3 +3964,4 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
     );
   }
 }
+

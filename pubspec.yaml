@@ -41,10 +41,13 @@ dev_dependencies:
   file_picker: ^8.0.0       # 用于文件选择 (请检查最新稳定版本)
   http: ^1.2.0              # 用于 HTTP 请求 (请检查最新稳定版本)
   just_audio: ^0.9.36       # 音频播放插件 (支持 Android, iOS, macOS, Windows, Linux, Web) (请检查最新稳定版本)
+  audioplayers: ^5.2.1 # <--- 为 Windows 添加这个
   flutter_secure_storage: ^9.0.0 # 安全存储 API Key (请检查最新稳定版本)
   shared_preferences: ^2.2.0    # 存储普通设置 (请检查最新稳定版本)
   path_provider: ^2.1.0       # 平台无关的路径提供 (某些插件可能需要) (请检查最新稳定版本)
   intl: ^0.20.2 # 目前最新版，兼容 Dart 3
+  gbk_codec: ^0.4.0 # 或者最新的兼容版本
+  epub_parser: ^3.0.1 # 或者最新的兼容版本
 
   # The "flutter_lints" package below contains a set of recommended lints to
   # encourage good coding practices. The lint set provided by the package is
